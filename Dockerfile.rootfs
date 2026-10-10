@@ -47,6 +47,9 @@ RUN apk add --no-cache \
     bash busybox iproute2 util-linux ca-certificates curl git openssh-client \
     gcompat libstdc++ \
     python3 py3-pip nodejs npm
+# Verify development tools at image build time, before templates are published.
+# Every sandbox inherits these files; there is no install step during VM boot.
+RUN git --version && test -s /etc/ssl/certs/ca-certificates.crt
 # Python kernel stack for stateful execution (kernel_bridge.py).
 RUN pip install --no-cache-dir --break-system-packages \
     ipykernel==7.2.0 ipython==9.12.0 jupyter_client==8.8.0 jupyter_core==5.9.1 \
