@@ -240,7 +240,7 @@ jobs:
             cp ops/orchestrator/docker-compose.yml /opt/renderops-orchestrator/docker-compose.yml
             cd /opt/renderops-orchestrator
             image="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
-            cpu_overcommit="${{ vars.ORCHESTRATOR_CPU_OVERCOMMIT_RATIO || '4' }}"
+            cpu_overcommit="${{ vars.ORCHESTRATOR_CPU_OVERCOMMIT_RATIO || '2' }}"
             test -f .env
             test -w .env
             test -n "${cpu_overcommit}"
@@ -380,7 +380,7 @@ jobs:
           SSH_HOST: ${{ secrets.WORKER_HOST }}
           SSH_USER: ${{ secrets.WORKER_USER }}
           WORKER_MAX_SESSIONS: ${{ vars.WORKER_MAX_SESSIONS || '200' }}
-          WORKER_CPU_OVERCOMMIT_RATIO: ${{ vars.WORKER_CPU_OVERCOMMIT_RATIO || '4' }}
+          WORKER_CPU_OVERCOMMIT_RATIO: ${{ vars.WORKER_CPU_OVERCOMMIT_RATIO || '2' }}
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL || 'https://dev-api.renderops.com' }}
@@ -433,7 +433,7 @@ jobs:
           SSH_HOST: ${{ secrets.WORKER_2_HOST }}
           SSH_USER: ${{ secrets.WORKER_2_USER }}
           WORKER_MAX_SESSIONS: ${{ vars.WORKER_MAX_SESSIONS || '200' }}
-          WORKER_CPU_OVERCOMMIT_RATIO: ${{ vars.WORKER_CPU_OVERCOMMIT_RATIO || '4' }}
+          WORKER_CPU_OVERCOMMIT_RATIO: ${{ vars.WORKER_CPU_OVERCOMMIT_RATIO || '2' }}
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL || 'https://dev-api.renderops.com' }}

@@ -1,0 +1,17 @@
+{
+  "name": "Agent workspace",
+  "slug": "agents",
+  "version": 1,
+  "status": "draft",
+  "image": "agents",
+  "packages": [
+    "@openai/codex@0.162.1",
+    "@anthropic-ai/claude-code@2.1.296",
+    "opencode-ai@1.19.0"
+  ],
+  "environment": {},
+  "egressPolicy": { "internet": true, "allowed_domains": [] },
+  "ports": [],
+  "compliance": {},
+  "artifactReleaseId": null
+}

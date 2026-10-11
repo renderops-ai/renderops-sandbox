@@ -2,6 +2,17 @@ package host
 
 import "testing"
 
+func TestResolveCapacityDefaultsToTwoTimesCPU(t *testing.T) {
+	t.Setenv("WORKER_ALLOCATABLE_VCPUS", "8")
+	t.Setenv("WORKER_CPU_OVERCOMMIT_RATIO", "")
+	t.Setenv("WORKER_MAX_SESSIONS", "200")
+	t.Setenv("SLOT_COUNT", "")
+	got := resolveCapacity()
+	if got.CPUOvercommitRatio != 2 || got.NetworkSlots != 16 {
+		t.Fatalf("default capacity = %+v, want 2x CPU and 16 slots", got)
+	}
+}
+
 func TestResolveCapacityDerivesNetworkSlots(t *testing.T) {
 	t.Setenv("WORKER_ALLOCATABLE_VCPUS", "8")
 	t.Setenv("WORKER_CPU_OVERCOMMIT_RATIO", "4")

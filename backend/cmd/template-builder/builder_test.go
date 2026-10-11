@@ -49,3 +49,26 @@ func TestMicroSpecIsMinimalAndUnwarmed(t *testing.T) {
 		t.Fatalf("micro spec should be bare: %#v", spec)
 	}
 }
+
+func TestAgentSpecsArePreinstalledAndValidated(t *testing.T) {
+	specs := agentSpecs()
+	if len(specs) != len(vmsize.Sizes) {
+		t.Fatal("agent release must cover every supported VM size")
+	}
+	for i, spec := range specs {
+		if spec.Name != vmsize.Sizes[i].Name || len(spec.Provision) != 0 {
+			t.Fatalf("agent spec installs at boot or has wrong size: %+v", spec)
+		}
+		for _, command := range []string{"git --version", "codex --version", "claude --version", "opencode --version"} {
+			found := false
+			for _, actual := range spec.Validate {
+				if actual == command {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("missing validation: %s", command)
+			}
+		}
+	}
+}

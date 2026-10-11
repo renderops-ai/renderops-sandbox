@@ -1,0 +1,9 @@
+# Never transfer local credentials or repository history to an image builder.
+.git
+**/.env
+**/.env.*
+**/*.pem
+**/node_modules
+**/__pycache__
+venv
+control-vpn.txt

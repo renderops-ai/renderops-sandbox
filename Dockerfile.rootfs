@@ -74,6 +74,19 @@ RUN git config --global credential.helper "" \
  && printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env \
  && mkdir -p /workspace
 
+# Optional agent image. The base rootfs remains unchanged. Build with
+# ALPINE=alpine:3.22 for Node 22, then target agents-rootfs-export below.
+FROM rootfs AS agents-rootfs
+ARG CODEX_VERSION=0.162.1
+ARG CLAUDE_VERSION=2.1.296
+ARG OPENCODE_VERSION=1.19.0
+RUN apk add --no-cache libgcc ripgrep \
+ && node -e 'if (+process.versions.node.split(".")[0] < 22) process.exit(1)'
+COPY templates/agents/install.sh /tmp/install-agents.sh
+RUN CODEX_VERSION=${CODEX_VERSION} CLAUDE_VERSION=${CLAUDE_VERSION} OPENCODE_VERSION=${OPENCODE_VERSION} \
+    sh /tmp/install-agents.sh \
+ && rm /tmp/install-agents.sh
+
 # ── pack the rootfs into an ext4 image (mkfs -d, no mount / no privileges) ───
 FROM ${ALPINE} AS ext4build
 ARG ROOTFS_SIZE=2G
@@ -90,6 +103,20 @@ RUN rm -rf /rootfs-root/proc /rootfs-root/sys && mkdir -p /rootfs-root/proc /roo
 
 FROM scratch AS rootfs-export
 COPY --from=ext4build /out/rootfs-alpine.ext4 /
+
+# Keep agent artifacts separate from the existing rootfs export and CI rollout.
+FROM ${ALPINE} AS agents-ext4build
+ARG AGENTS_ROOTFS_SIZE=4G
+RUN apk add --no-cache e2fsprogs
+COPY --from=agents-rootfs / /rootfs-root
+RUN rm -rf /rootfs-root/proc /rootfs-root/sys && mkdir -p /rootfs-root/proc /rootfs-root/sys \
+ && rm -rf /rootfs-root/dev && mkdir -p /rootfs-root/dev \
+ && printf 'nameserver 8.8.8.8\n' > /rootfs-root/etc/resolv.conf \
+ && mkdir -p /out \
+ && mkfs.ext4 -q -L agents-rootfs -m 0 -d /rootfs-root /out/rootfs-agents.ext4 ${AGENTS_ROOTFS_SIZE}
+
+FROM scratch AS agents-rootfs-export
+COPY --from=agents-ext4build /out/rootfs-agents.ext4 /
 
 # ── initramfs: static busybox + this repo's OverlayFS init ───────────────────
 FROM ${ALPINE} AS initramfsbuild

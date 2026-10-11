@@ -53,10 +53,21 @@ func standardSpecs(provision []string) []buildSpec {
 	return specs
 }
 
-// microSpec is the bare benchmark variant: 1 vCPU / 128 MB / 512 MB, no warm-up,
-// no packages. It's the smallest possible template — used to benchmark the
-// build->publish->restore pipeline with tiny artifacts. Under 2x CPU overcommit its
-// effective guaranteed share is ~0.5 vCPU.
+// agentSpecs installs nothing in the VM: binaries are baked into the rootfs.
+// Validate all agents after restore, without API keys or model calls.
+func agentSpecs() []buildSpec {
+	specs := standardSpecs(nil)
+	for i := range specs {
+		specs[i].Validate = append(specs[i].Validate,
+			"node -e 'if (+process.versions.node.split(\".\")[0] < 22) process.exit(1)'",
+			"node -e 'const m=require(\"/etc/spawn/agents.json\"); if (m.image!==\"agents\") process.exit(1)'",
+			"git --version", "codex --version", "claude --version", "opencode --version")
+	}
+	return specs
+}
+
+// microSpec is the bare benchmark variant: 1 vCPU / 128 MB / 512 MB, no warm-up
+// or provisioned packages. CPU throughput under overcommit is workload-dependent.
 func microSpec() buildSpec {
 	return buildSpec{
 		Name:     "micro",

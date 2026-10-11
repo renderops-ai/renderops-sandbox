@@ -55,6 +55,12 @@ func envBool(key string, def bool) bool {
 
 func main() {
 	setupLogger()
+	buildAgents := envBool("BUILD_AGENTS", false)
+	buildStandard := envBool("BUILD_STANDARD", !buildAgents)
+	if buildAgents && buildStandard {
+		slog.Error("agent build must not activate the standard release; set BUILD_STANDARD=false")
+		os.Exit(1)
+	}
 
 	h, err := host.Init()
 	if err != nil {
@@ -113,7 +119,7 @@ func main() {
 	}
 
 	// ---- standard release: nano/small/medium (warmed), activated for serving ----
-	if envBool("BUILD_STANDARD", true) {
+	if buildStandard {
 		var variants []template.BuiltVariant
 		for _, s := range standardSpecs(stdProvision) {
 			slog.Info("building standard variant", "size", s.Name, "vcpus", s.VCPUs, "memory_mb", s.MemoryMB, "disk_mb", s.DiskMB)
@@ -138,8 +144,31 @@ func main() {
 		slog.Info("standard release published + ACTIVATED", "release_id", m.ReleaseID, "variants", len(m.Variants))
 	}
 
+	// Agent release is deliberately opt-in and never changes the shared active
+	// pointer. Its builder assets must contain the agent rootfs; validation checks
+	// the marker and every CLI after restore before any release is published.
+	if buildAgents {
+		var variants []template.BuiltVariant
+		for _, s := range agentSpecs() {
+			bv, err := buildAndValidate(ctx, mgr, cfg, s, filepath.Join(snapRoot, "agents"))
+			if err != nil {
+				slog.Error("agent variant build failed", "size", s.Name, "err", err)
+				os.Exit(1)
+			}
+			variants = append(variants, bv)
+			time.Sleep(2 * time.Second)
+		}
+		releaseID := "agents-" + stamp
+		m, err := template.PublishRelease(ctx, artifactStore, repo, releaseInputs(releaseID, f, variants))
+		if err != nil {
+			slog.Error("publish agent release", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("agent release published (not activated)", "release_id", m.ReleaseID)
+	}
+
 	// ---- micro release: bare benchmark, published but NOT activated ----
-	if envBool("BUILD_MICRO", true) {
+	if envBool("BUILD_MICRO", !buildAgents) {
 		s := microSpec()
 		slog.Info("building micro benchmark variant", "vcpus", s.VCPUs, "memory_mb", s.MemoryMB, "disk_mb", s.DiskMB)
 		bv, err := buildAndValidate(ctx, mgr, cfg, s, filepath.Join(snapRoot, "micro"))

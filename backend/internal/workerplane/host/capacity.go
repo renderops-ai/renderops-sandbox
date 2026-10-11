@@ -22,7 +22,7 @@ type CapacityConfig struct {
 
 func resolveCapacity() CapacityConfig {
 	physicalVCPUs := envInt("WORKER_ALLOCATABLE_VCPUS", runtime.NumCPU())
-	cpuRatio := envFloat("WORKER_CPU_OVERCOMMIT_RATIO", 4)
+	cpuRatio := envFloat("WORKER_CPU_OVERCOMMIT_RATIO", 2)
 	maxSessions := envInt("WORKER_MAX_SESSIONS", defaultMaxSessions)
 
 	networkSlots := int(math.Floor(float64(physicalVCPUs) * cpuRatio))

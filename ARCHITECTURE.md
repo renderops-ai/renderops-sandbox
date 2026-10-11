@@ -84,7 +84,7 @@ second worker-side `pending` counter: failed boot removes the reservation;
 successful boot keeps it. The lifecycle state `provisioning` is durable status,
 not another capacity counter.
 
-Configured defaults in deployment are CPU overcommit 4x and memory overcommit
+Configured defaults in deployment are CPU overcommit 2x and memory overcommit
 1x. Policy belongs to the orchestrator/worker environment, never the client.
 
 ## Execution Flow
