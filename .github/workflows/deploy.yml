@@ -24,6 +24,10 @@ on:
         description: "Build and roll out a new guest-agent rootfs"
         default: false
         type: boolean
+      deploy_kernel:
+        description: "Roll out the guest kernel pinned in ops/worker/kernel.lock"
+        default: false
+        type: boolean
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -291,6 +295,7 @@ jobs:
       contents: read
     outputs:
       rootfs_changed: ${{ steps.rootfs.outputs.changed }}
+      kernel_release: ${{ steps.kernel.outputs.release }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -335,6 +340,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Download pinned guest kernel
+        id: kernel
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy_kernel
+        env:
+          # spawn-kernel is private: read-only token scoped to that repo.
+          GH_TOKEN: ${{ secrets.SPAWN_KERNEL_TOKEN }}
+        run: |
+          lock_value() { sed -n "s/^$1=//p" ops/worker/kernel.lock; }
+          repo="$(lock_value KERNEL_REPO)"
+          release="$(lock_value KERNEL_RELEASE)"
+          expected="$(lock_value KERNEL_SHA256)"
+          [[ "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid KERNEL_RELEASE: $release"; exit 1; }
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo "KERNEL_SHA256 in kernel.lock is not a sha256 digest yet"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "SPAWN_KERNEL_TOKEN secret is not set"; exit 1; }
+          mkdir -p /tmp/renderops-kernel-artifact
+          gh release download "$release" --repo "$repo" --pattern "$release" \
+            --dir /tmp/renderops-kernel-artifact
+          mv "/tmp/renderops-kernel-artifact/$release" /tmp/renderops-kernel-artifact/vmlinux
+          actual="$(sha256sum /tmp/renderops-kernel-artifact/vmlinux | awk '{ print $1 }')"
+          [ "$actual" = "$expected" ] || { echo "kernel checksum mismatch: expected $expected, got $actual"; exit 1; }
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: Upload pinned guest kernel
+        if: steps.kernel.outputs.release != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderops-kernel-${{ github.sha }}
+          path: /tmp/renderops-kernel-artifact
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload worker binary
         uses: actions/upload-artifact@v4
         with:
@@ -365,6 +399,12 @@ jobs:
         with:
           name: renderops-rootfs-${{ github.sha }}
           path: /tmp/renderops-rootfs-artifact
+      - name: Download pinned guest kernel
+        if: needs.build-worker.outputs.kernel_release != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-kernel-${{ github.sha }}
+          path: /tmp/renderops-kernel-artifact
       - name: Deploy worker 1
         run: |
           args=()
@@ -373,6 +413,11 @@ jobs:
               /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz
               /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.sha256
             )
+          fi
+          if [ -f /tmp/renderops-kernel-artifact/vmlinux ]; then
+            export KERNEL_FILE=/tmp/renderops-kernel-artifact/vmlinux
+            export KERNEL_RELEASE="$(sed -n 's/^KERNEL_RELEASE=//p' ops/worker/kernel.lock)"
+            export KERNEL_SHA256="$(sed -n 's/^KERNEL_SHA256=//p' ops/worker/kernel.lock)"
           fi
           bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:
@@ -418,6 +463,12 @@ jobs:
         with:
           name: renderops-rootfs-${{ github.sha }}
           path: /tmp/renderops-rootfs-artifact
+      - name: Download pinned guest kernel
+        if: needs.build-worker.outputs.kernel_release != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-kernel-${{ github.sha }}
+          path: /tmp/renderops-kernel-artifact
       - name: Deploy worker 2
         run: |
           args=()
@@ -426,6 +477,11 @@ jobs:
               /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz
               /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.sha256
             )
+          fi
+          if [ -f /tmp/renderops-kernel-artifact/vmlinux ]; then
+            export KERNEL_FILE=/tmp/renderops-kernel-artifact/vmlinux
+            export KERNEL_RELEASE="$(sed -n 's/^KERNEL_RELEASE=//p' ops/worker/kernel.lock)"
+            export KERNEL_SHA256="$(sed -n 's/^KERNEL_SHA256=//p' ops/worker/kernel.lock)"
           fi
           bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:

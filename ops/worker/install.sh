@@ -13,6 +13,8 @@
 #        WORKER_MAX_TERMINALS_PER_SANDBOX
 #        CONTROL_PLANE_INTERNAL_URL (internal raw-usage ingestion endpoint)
 #        BLOB_STORAGE_ACCOUNT, BLOB_CONTAINER_NAME, BLOB_SECRET_KEY
+#        KERNEL_FILE, KERNEL_SHA256, KERNEL_RELEASE (optional, all or none:
+#        activates a guest kernel from ops/worker/kernel.lock)
 set -euo pipefail
 
 BINARY="${1:?usage: install-worker.sh <binary>}"
@@ -21,7 +23,9 @@ ROOTFS_CHECKSUM="${3:-}"
 : "${SSH_KEY:?SSH_KEY required}" "${SSH_HOST:?SSH_HOST required}" "${SSH_USER:?SSH_USER required}"
 UNIT="$(dirname "$0")/worker.service"
 ROOTFS_INSTALLER="$(dirname "$0")/activate-rootfs.sh"
+KERNEL_INSTALLER="$(dirname "$0")/activate-kernel.sh"
 DEPLOY_ROOTFS_VERSION=""
+DEPLOY_KERNEL_RELEASE=""
 
 if [ -n "$ROOTFS_ARCHIVE" ] || [ -n "$ROOTFS_CHECKSUM" ]; then
 	: "${ROOTFS_ARCHIVE:?rootfs archive required}" "${ROOTFS_CHECKSUM:?rootfs checksum required}"
@@ -29,6 +33,27 @@ if [ -n "$ROOTFS_ARCHIVE" ] || [ -n "$ROOTFS_CHECKSUM" ]; then
 	test -f "$ROOTFS_ARCHIVE"
 	test -f "$ROOTFS_CHECKSUM"
 	DEPLOY_ROOTFS_VERSION="$ROOTFS_VERSION"
+fi
+
+if [ -n "${KERNEL_FILE:-}" ] || [ -n "${KERNEL_SHA256:-}" ] || [ -n "${KERNEL_RELEASE:-}" ]; then
+	: "${KERNEL_FILE:?KERNEL_FILE required when deploying a kernel}"
+	: "${KERNEL_SHA256:?KERNEL_SHA256 required when deploying a kernel}"
+	: "${KERNEL_RELEASE:?KERNEL_RELEASE required when deploying a kernel}"
+	test -f "$KERNEL_FILE"
+	# Both values are embedded in the remote command line below.
+	case "$KERNEL_RELEASE" in
+	*[!A-Za-z0-9._-]* | .*)
+		echo "invalid KERNEL_RELEASE: $KERNEL_RELEASE" >&2
+		exit 1
+		;;
+	esac
+	case "$KERNEL_SHA256" in
+	*[!0-9a-f]*)
+		echo "invalid KERNEL_SHA256" >&2
+		exit 1
+		;;
+	esac
+	DEPLOY_KERNEL_RELEASE="$KERNEL_RELEASE"
 fi
 
 for value in "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
@@ -61,10 +86,15 @@ if [ -n "$ROOTFS_ARCHIVE" ]; then
 	$SCP "$ROOTFS_CHECKSUM" "${SSH_USER}@${SSH_HOST}:/tmp/renderops-rootfs.sha256.new"
 	$SCP "$ROOTFS_INSTALLER" "${SSH_USER}@${SSH_HOST}:/tmp/activate-rootfs.sh.new"
 fi
+if [ -n "$DEPLOY_KERNEL_RELEASE" ]; then
+	echo "==> uploading kernel ${KERNEL_RELEASE}"
+	$SCP "$KERNEL_FILE" "${SSH_USER}@${SSH_HOST}:/tmp/renderops-vmlinux.new"
+	$SCP "$KERNEL_INSTALLER" "${SSH_USER}@${SSH_HOST}:/tmp/activate-kernel.sh.new"
+fi
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' BLOB_STORAGE_ACCOUNT='${BLOB_STORAGE_ACCOUNT:-}' BLOB_CONTAINER_NAME='${BLOB_CONTAINER_NAME:-}' BLOB_SECRET_KEY='${BLOB_SECRET_KEY:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' BLOB_STORAGE_ACCOUNT='${BLOB_STORAGE_ACCOUNT:-}' BLOB_CONTAINER_NAME='${BLOB_CONTAINER_NAME:-}' BLOB_SECRET_KEY='${BLOB_SECRET_KEY:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' KERNEL_RELEASE='${DEPLOY_KERNEL_RELEASE}' KERNEL_SHA256='${KERNEL_SHA256:-}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -110,8 +140,14 @@ if [ -n "${ROOTFS_VERSION:-}" ]; then
   ROOT_DIRECTORY=/opt/renderops/worker /tmp/activate-rootfs.sh.new \
     /tmp/renderops-rootfs.tar.gz.new /tmp/renderops-rootfs.sha256.new "$ROOTFS_VERSION"
 fi
+if [ -n "${KERNEL_RELEASE:-}" ]; then
+  chmod 0755 /tmp/activate-kernel.sh.new
+  ROOT_DIRECTORY=/opt/renderops/worker /tmp/activate-kernel.sh.new \
+    /tmp/renderops-vmlinux.new "$KERNEL_SHA256" "$KERNEL_RELEASE"
+fi
 rm -f /tmp/renderops-worker.new /tmp/renderops-worker.service.new \
-  /tmp/activate-rootfs.sh.new /tmp/renderops-rootfs.tar.gz.new /tmp/renderops-rootfs.sha256.new
+  /tmp/activate-rootfs.sh.new /tmp/renderops-rootfs.tar.gz.new /tmp/renderops-rootfs.sha256.new \
+  /tmp/activate-kernel.sh.new /tmp/renderops-vmlinux.new
 systemctl daemon-reload
 systemctl enable renderops-worker >/dev/null 2>&1 || true
 systemctl restart renderops-worker

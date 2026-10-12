@@ -1,0 +1,9 @@
+# Guest kernel that workers boot sandboxes with. Built and published as a GitHub
+# Release by renderops-ai/spawn-kernel. Changing these lines and running the
+# Deploy workflow with deploy_kernel=true rolls the kernel out; normal pushes
+# never touch it.
+KERNEL_REPO=renderops-ai/spawn-kernel
+KERNEL_RELEASE=vmlinux-6.1.182-renderops.1
+# sha256 of the release's vmlinux asset (from its SHA256SUMS). Deploys fail until
+# this is the real 64-character digest.
+KERNEL_SHA256=pending-first-release

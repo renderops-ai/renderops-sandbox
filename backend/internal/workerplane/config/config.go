@@ -80,7 +80,15 @@ func Load() (*Config, error) {
 		cfg.FirecrackerBinary = abs
 	}
 
-	cfg.KernelPath = filepath.Join(cfg.AssetsPath, "kernel", "vmlinux")
+	// Guest kernel: by default the activated version under assets
+	// (ops/worker/activate-kernel.sh); KERNEL_PATH points at a specific file.
+	cfg.KernelPath = defaultString(
+		strings.TrimSpace(os.Getenv("KERNEL_PATH")),
+		filepath.Join(cfg.AssetsPath, "kernel", "vmlinux"),
+	)
+	if abs, aerr := filepath.Abs(cfg.KernelPath); aerr == nil {
+		cfg.KernelPath = abs
+	}
 	cfg.RootfsPath = filepath.Join(cfg.AssetsPath, "rootfs", "rootfs-alpine.ext4")
 	cfg.InitrdPath = filepath.Join(cfg.AssetsPath, "initramfs.cpio.gz")
 

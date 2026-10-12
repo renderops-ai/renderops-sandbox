@@ -18,6 +18,7 @@ import (
 	"backend/internal/vmsize"
 	"backend/internal/worker"
 	"backend/internal/workerplane/host"
+	"bytes"
 	"context"
 	"log/slog"
 	"net"
@@ -157,6 +158,26 @@ func createTemplateWithRetry(mgr *firecracker.FireCrackerManager, cfg firecracke
 	return nil, lastErr
 }
 
+// guestKernelVersion returns the release from the "Linux version ..." banner
+// embedded in a vmlinux image, or "unknown". Used only for the startup log.
+func guestKernelVersion(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("read guest kernel version failed", "path", path, "err", err)
+		return "unknown"
+	}
+	const banner = "Linux version "
+	i := bytes.Index(data, []byte(banner))
+	if i < 0 {
+		return "unknown"
+	}
+	release := data[i+len(banner):]
+	if end := bytes.IndexAny(release, " \x00\n"); end >= 0 && end <= 64 {
+		return string(release[:end])
+	}
+	return "unknown"
+}
+
 func main() {
 	setupLogger()
 
@@ -178,6 +199,15 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.RootfsPath = resolvedRootfs
+	// Same for the kernel: pin this process to the activated version so a later
+	// activate-kernel.sh only takes effect on restart.
+	resolvedKernel, err := filepath.EvalSymlinks(cfg.KernelPath)
+	if err != nil {
+		slog.Error("resolve immutable kernel failed", "path", cfg.KernelPath, "err", err)
+		os.Exit(1)
+	}
+	cfg.KernelPath = resolvedKernel
+	slog.Info("guest kernel", "path", cfg.KernelPath, "version", guestKernelVersion(cfg.KernelPath))
 
 	// Base config derives from the DEFAULT size (vmsize.Default) so the default-size
 	// template is actually built at that shape — not a hardcoded 256MB/10GB.
