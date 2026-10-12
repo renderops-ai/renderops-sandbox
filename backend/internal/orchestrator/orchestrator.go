@@ -482,7 +482,12 @@ func (s *Service) Resume(ctx context.Context, sandboxID string) (resultErr error
 				fmt.Errorf("resume cleanup failed; capacity remains reserved: %w", cleanupErr),
 			)
 		}
-		if cancelErr := s.store.CancelResume(ctx, sandboxID, placement.WorkerID); cancelErr != nil {
+		// Settle the durable state even if the caller has gone away; a cancelled
+		// context here would strand the row in resuming.
+		storeCtx, storeCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		cancelErr := s.store.CancelResume(storeCtx, sandboxID, placement.WorkerID)
+		storeCancel()
+		if cancelErr != nil {
 			return errors.Join(
 				fmt.Errorf("resume sandbox on worker: %w", err),
 				fmt.Errorf("release failed resume reservation: %w", cancelErr),
@@ -490,8 +495,10 @@ func (s *Service) Resume(ctx context.Context, sandboxID string) (resultErr error
 		}
 		return fmt.Errorf("resume sandbox on worker: %w", err)
 	}
+	storeCtx, storeCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer storeCancel()
 	return s.store.UpdatePlacementState(
-		ctx,
+		storeCtx,
 		sandboxID,
 		placement.WorkerID,
 		[]string{"resuming"},
