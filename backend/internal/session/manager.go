@@ -751,17 +751,24 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	memPath := filepath.Join(snapDir, "mem")
 
 	// Capture resume info before tearing the VM down. The session snapshot bakes the
-	// TEMPLATE's device paths (Firecracker carries the vsock UDS path + TAP name forward
-	// across restore — not the per-VM runtime slot names), so resume must restore against
-	// those. Each size has its own template with its own baked device names, so use the
-	// session's OWN size template (not the default). Persisted in the manifest for recovery.
+	// device paths the VM was restored with (Firecracker carries the vsock UDS path + TAP
+	// name forward across restore — not the per-VM runtime slot names), so resume must
+	// restore against those. Take them from the VM itself: the current template's names
+	// differ after a template rebuild (e.g. kernel rollout), and a resumed session still
+	// carries its original ones. Persisted in the manifest for recovery.
 	vmID := sess.VM.ID
-	tmpl := m.sizeTemplates[sandboximage.PoolKey(sess.Image, vmsize.Key(sess.VCPUs, sess.MemoryMB, sess.DiskGB))]
-	if tmpl == nil {
-		tmpl = m.template
+	if sess.VM.SnapshotVsockPath != "" {
+		sess.VsockPathAtPause = sess.VM.SnapshotVsockPath
+		sess.TapNameAtPause = sess.VM.SnapshotTapName
+	} else {
+		// Fallback for a VM without recorded restore paths: the session's own size template.
+		tmpl := m.sizeTemplates[sandboximage.PoolKey(sess.Image, vmsize.Key(sess.VCPUs, sess.MemoryMB, sess.DiskGB))]
+		if tmpl == nil {
+			tmpl = m.template
+		}
+		sess.VsockPathAtPause = tmpl.VsockPath
+		sess.TapNameAtPause = tmpl.TapName
 	}
-	sess.VsockPathAtPause = tmpl.VsockPath
-	sess.TapNameAtPause = tmpl.TapName
 	sess.WritableDiskPath = sess.VM.WritableDiskPath
 	sess.RootfsPathAtPause = sess.VM.Config.RootfsPath
 

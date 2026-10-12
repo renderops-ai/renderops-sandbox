@@ -70,6 +70,12 @@ type MicroVM struct {
 	Process          *exec.Cmd
 	Stdout           *bytes.Buffer
 	Stderr           *bytes.Buffer
+
+	// Device names baked into the snapshot this VM was restored from. Firecracker
+	// carries them forward into any snapshot taken of this VM, so they can differ
+	// from the current template's after a template rebuild. Empty for cold boots.
+	SnapshotVsockPath string
+	SnapshotTapName   string
 }
 
 type NetworkInterface struct {
@@ -922,6 +928,9 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 		Process:          cmd,
 		Stdout:           &stdout,
 		Stderr:           &stderr,
+
+		SnapshotVsockPath: tmpl.VsockPath,
+		SnapshotTapName:   tmpl.TapName,
 	}
 
 	f.mu.Lock()
