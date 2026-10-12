@@ -340,13 +340,19 @@ func (c *Client) PausePlacement(ctx context.Context, sandboxID, workerID string)
 	if currentState == "paused" {
 		return tx.Commit(ctx)
 	}
-	if currentState != "active" {
+	// A worker reporting paused while the row is resuming means the restore never
+	// took (e.g. resume cleanup re-pausing a failed restore). The VM is not running,
+	// so the row returns to paused instead of being stranded in resuming.
+	if currentState != "active" && currentState != "resuming" {
 		return orchestrator.ErrInvalidState
 	}
 
+	// paused_at keeps the original pause time when a failed resume falls back.
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
-		SET state='paused', paused_at=now(), updated_at=now()
+		SET state='paused',
+		    paused_at=CASE WHEN state='active' THEN now() ELSE paused_at END,
+		    updated_at=now()
 		WHERE id=$1::uuid`,
 		sandboxID,
 	); err != nil {
