@@ -321,17 +321,19 @@ the rolling deployment.
 
 Sandboxes boot the kernel at `assets/kernel/vmlinux`, a symlink into
 `assets/kernel/versions/` (override with `KERNEL_PATH`). Kernels are built and
-published as releases by `renderops-ai/spawn-kernel`; `ops/worker/kernel.lock`
+published as releases by `renderops-ai/spawn-kernel` and mirrored to Azure Blob
+under `kernel-release/`; `ops/worker/kernel.lock`
 pins the release and its sha256. Normal deploys never change the kernel.
 
 To roll out a kernel:
 
 1. Publish it from `spawn-kernel` and copy the release name and the `vmlinux`
    sha256 (from its `SHA256SUMS`) into `ops/worker/kernel.lock`.
-2. Run `Deploy` with `deploy_kernel: true` and `target: worker-1` first. The
-   workflow downloads the release (repository secret `SPAWN_KERNEL_TOKEN`:
-   read-only access to `spawn-kernel`), verifies the sha256, and runs
-   `activate-kernel.sh`, which installs the version, moves the symlink and
+2. Run `Deploy` with `deploy_kernel: true` and `target: worker-1` first. Each
+   worker job runs `fetch-kernel.sh`, which downloads
+   `kernel-release/<release>/vmlinux` from Azure Blob (spawn-kernel mirrors every
+   release there; uses the existing `BLOB_*` secrets) and verifies the sha256,
+   then `activate-kernel.sh`, which installs the version, moves the symlink and
    updates the `kernel/vmlinux` line in `manifest.sha256`.
 3. The worker restarts and rebuilds its templates (the kernel digest changed).
    The startup log line `guest kernel` shows the version. Paused sandboxes keep

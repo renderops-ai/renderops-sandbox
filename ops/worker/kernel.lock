@@ -1,7 +1,8 @@
-# Guest kernel that workers boot sandboxes with. Built and published as a GitHub
-# Release by renderops-ai/spawn-kernel. Changing these lines and running the
-# Deploy workflow with deploy_kernel=true rolls the kernel out; normal pushes
-# never touch it.
+# Guest kernel that workers boot sandboxes with. Built and published by
+# renderops-ai/spawn-kernel, which mirrors each release to Azure Blob at
+# <container>/kernel-release/<release>/ (ops/worker/fetch-kernel.sh downloads it
+# from there). Changing these lines and running the Deploy workflow with
+# deploy_kernel=true rolls the kernel out; normal pushes never touch it.
 KERNEL_REPO=renderops-ai/spawn-kernel
 KERNEL_RELEASE=vmlinux-6.1.182-renderops.2
 # sha256 of the release's vmlinux asset (from its SHA256SUMS). Deploys fail until
