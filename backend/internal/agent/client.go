@@ -15,17 +15,23 @@ import (
 	"backend/internal/plane"
 )
 
+// LifecycleTimeout bounds pause and resume. They snapshot the VM and move its
+// memory and disk to or from Blob, which takes minutes for large sandboxes.
+const LifecycleTimeout = 10 * time.Minute
+
 type Client struct {
-	base  string // e.g. http://127.0.0.1:19876
-	token string
-	http  *http.Client
+	base      string // e.g. http://127.0.0.1:19876
+	token     string
+	http      *http.Client
+	lifecycle *http.Client // pause and resume
 }
 
 func NewClient(base, token string) *Client {
 	return &Client{
-		base:  base,
-		token: token,
-		http:  &http.Client{Timeout: 60 * time.Second},
+		base:      base,
+		token:     token,
+		http:      &http.Client{Timeout: 60 * time.Second},
+		lifecycle: &http.Client{Timeout: LifecycleTimeout},
 	}
 }
 
@@ -49,11 +55,11 @@ func (c *Client) Exec(ctx context.Context, id string, req plane.ExecRequest) (pl
 }
 
 func (c *Client) Pause(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, plane.RouteSandboxPrefix+id+"/pause", nil, nil)
+	return c.doWith(ctx, c.lifecycle, http.MethodPost, plane.RouteSandboxPrefix+id+"/pause", nil, nil)
 }
 
 func (c *Client) Resume(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, plane.RouteSandboxPrefix+id+"/resume", nil, nil)
+	return c.doWith(ctx, c.lifecycle, http.MethodPost, plane.RouteSandboxPrefix+id+"/resume", nil, nil)
 }
 
 func (c *Client) Destroy(ctx context.Context, id string) error {
@@ -75,6 +81,10 @@ func (c *Client) Health(ctx context.Context) error {
 // body into out (out may be nil). Non-2xx becomes an error carrying the agent's
 // structured message when present.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(ctx, c.http, method, path, body, out)
+}
+
+func (c *Client) doWith(ctx context.Context, client *http.Client, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -93,7 +103,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("agent unreachable: %w", err)
 	}

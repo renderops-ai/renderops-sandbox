@@ -181,7 +181,9 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 		s.portProxy(w, r, id, strings.TrimPrefix(op, "ports/"))
 
 	case op == "pause" && r.Method == http.MethodPost:
-		err := s.svc.Pause(r.Context(), id)
+		// Finish even if the caller disconnects: a pause cancelled halfway would
+		// leave the sandbox neither running nor checkpointed.
+		err := s.svc.Pause(context.WithoutCancel(r.Context()), id)
 		if err == nil && s.admission != nil {
 			s.admission.MarkPaused(id)
 		}
@@ -198,7 +200,8 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		err := s.svc.Resume(r.Context(), id)
+		// Like pause: a resume cancelled halfway leaves a half-restored VM.
+		err := s.svc.Resume(context.WithoutCancel(r.Context()), id)
 		if err != nil && s.admission != nil {
 			s.admission.MarkPaused(id)
 		}

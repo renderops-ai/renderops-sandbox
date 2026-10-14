@@ -61,9 +61,10 @@ func main() {
 		Handler:           orchestrator.NewHTTPServer(service, cfg.Token, cfg.WorkerToken).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      120 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		// Pause and resume wait for the worker for up to agent.LifecycleTimeout.
+		WriteTimeout:   agent.LifecycleTimeout + 30*time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	go func() {

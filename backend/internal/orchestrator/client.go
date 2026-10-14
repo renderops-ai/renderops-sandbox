@@ -14,9 +14,10 @@ import (
 )
 
 type Client struct {
-	base  string
-	token string
-	http  *http.Client
+	base      string
+	token     string
+	http      *http.Client
+	lifecycle *http.Client // pause and resume: the worker may need minutes
 }
 
 func NewClient(base, token string) *Client {
@@ -24,6 +25,10 @@ func NewClient(base, token string) *Client {
 		base:  strings.TrimRight(strings.TrimSpace(base), "/"),
 		token: strings.TrimSpace(token),
 		http:  &http.Client{Timeout: 90 * time.Second},
+		// Longer than the orchestrator's own pause/resume timeout towards the
+		// worker (agent.LifecycleTimeout, 10m), so the worker's answer or error
+		// gets back to the caller instead of a timeout here.
+		lifecycle: &http.Client{Timeout: 11 * time.Minute},
 	}
 }
 
@@ -40,11 +45,11 @@ func (c *Client) Placement(ctx context.Context, sandboxID string) (Placement, er
 }
 
 func (c *Client) Pause(ctx context.Context, sandboxID string) error {
-	return c.do(ctx, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/pause", nil, nil)
+	return c.doWith(ctx, c.lifecycle, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/pause", nil, nil)
 }
 
 func (c *Client) Resume(ctx context.Context, sandboxID string) error {
-	return c.do(ctx, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/resume", nil, nil)
+	return c.doWith(ctx, c.lifecycle, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/resume", nil, nil)
 }
 
 func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
@@ -84,6 +89,10 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(ctx, c.http, method, path, body, out)
+}
+
+func (c *Client) doWith(ctx context.Context, client *http.Client, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
@@ -100,7 +109,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := c.http.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("orchestrator unreachable: %w", err)
 	}
