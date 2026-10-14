@@ -52,7 +52,9 @@ type UsageInfo struct {
 
 type CreateSessionRequest struct {
 	Name         string            `json:"name,omitempty"`     //dashboard-facing label; default "sandbox"
-	Image        string            `json:"image,omitempty"`    // immutable template image id; default "alpine"
+	OS           string            `json:"os,omitempty"`       // base OS; default "alpine" (see GET /v1/catalog)
+	Template     string            `json:"template,omitempty"` // software on top of the OS; default "base"
+	Image        string            `json:"image,omitempty"`    // legacy: image id, used when os/template are unset; default "alpine"
 	Metadata     map[string]any    `json:"metadata,omitempty"` //user labels (purpose/owner/etc.) for list + filter
 	Env          map[string]string `json:"env,omitempty"`
 	Size         string            `json:"size,omitempty"`           // named size from the menu ("nano"...); the sk dashboard sends this
@@ -80,6 +82,8 @@ type CreateSessionResponse struct {
 type SessionDetail struct {
 	SessionID    string `json:"session_id"`
 	Image        string `json:"image"`
+	OS           string `json:"os,omitempty"`
+	Template     string `json:"template,omitempty"`
 	State        string `json:"state"`
 	BillingModel string `json:"billing_model"`
 	CreatedAt    string `json:"created_at"`

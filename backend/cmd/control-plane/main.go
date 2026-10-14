@@ -110,6 +110,7 @@ func main() {
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
+	publicMux.HandleFunc("GET /v1/catalog", handler.CatalogHandler())
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ports/{port}/preview", handler.CreatePreviewHandler(svc, previewSigner, cfg.PreviewDomain))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ide/sessions", handler.CreateIDESessionHandler(svc, orchestratorClient, ideWorkers, ideSigner, cfg.PreviewDomain))

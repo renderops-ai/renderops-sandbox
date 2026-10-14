@@ -66,11 +66,15 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 					return
 				}
 			}
-			image, err := sandboximage.Normalize(createReq.Image)
+			image, err := sandboximage.Resolve(createReq.OS, createReq.Template, createReq.Image)
 			if err != nil {
+				code := "invalid_image"
+				if createReq.OS != "" || createReq.Template != "" {
+					code = "invalid_template"
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(APIError{Status: "error", Code: "invalid_image", Message: err.Error(), RequestID: requestID})
+				json.NewEncoder(w).Encode(APIError{Status: "error", Code: code, Message: err.Error(), RequestID: requestID})
 				return
 			}
 
@@ -92,7 +96,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				json.NewEncoder(w).Encode(APIError{
 					Status:    "error",
 					Code:      "size_not_available",
-					Message:   fmt.Sprintf("image %q does not run at size %q (allowed: %s)", image, size.Name, strings.Join(sandboximage.Sizes(image), ", ")),
+					Message:   sizeNotAvailableMessage(image, size.Name),
 					RequestID: requestID,
 				})
 				return
@@ -167,6 +171,8 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Session: &SessionDetail{
 					SessionID:    sess.ID,
 					Image:        sess.Image,
+					OS:           osOf(sess.Image),
+					Template:     templateOf(sess.Image),
 					State:        "active",
 					BillingModel: sess.BillingModel,
 					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
@@ -499,6 +505,9 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				RequestID: requestID,
 				Session: &SessionDetail{
 					SessionID:    sess.ID,
+					Image:        sess.Image,
+					OS:           osOf(sess.Image),
+					Template:     templateOf(sess.Image),
 					State:        string(sess.State),
 					BillingModel: sess.BillingModel,
 					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),

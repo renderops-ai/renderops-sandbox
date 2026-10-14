@@ -52,3 +52,30 @@ func TestSizeAllowed(t *testing.T) {
 		}
 	}
 }
+
+func TestResolve(t *testing.T) {
+	cases := []struct {
+		os, template, image string
+		want                string
+		wantErr             bool
+	}{
+		{"", "", "", Default, false},              // nothing set: default image
+		{"", "", "agents", "agents", false},       // legacy image field
+		{"alpine", "agents", "", "agents", false}, // new fields
+		{"", "agents", "", "agents", false},       // os defaults to alpine
+		{"alpine", "", "", Default, false},        // template defaults to base
+		{"alpine", "agents", "agents", "agents", false},
+		{"alpine", "agents", "alpine", "", true}, // image conflicts with template
+		{"debian", "base", "", "", true},         // unknown os
+		{"alpine", "aws-cli", "", "", true},      // unknown template
+	}
+	for _, c := range cases {
+		got, err := Resolve(c.os, c.template, c.image)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("Resolve(%q, %q, %q) = %q, %v; want %q, err=%v", c.os, c.template, c.image, got, err, c.want, c.wantErr)
+		}
+	}
+	if os, template := Describe("agents"); os != "alpine" || template != "agents" {
+		t.Errorf("Describe(agents) = %q, %q", os, template)
+	}
+}

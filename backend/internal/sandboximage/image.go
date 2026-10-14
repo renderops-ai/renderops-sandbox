@@ -45,3 +45,114 @@ func SizeAllowed(image, size string) bool {
 	allowed, known := sizesByImage[image]
 	return !known || slices.Contains(allowed, size)
 }
+
+// The public model is three choices: an OS, a template built on that OS, and a
+// size. Each (OS, template) pair is one image that workers boot; the image id
+// stays the internal routing key between control plane, orchestrator and workers.
+
+const (
+	DefaultOS       = "alpine"
+	DefaultTemplate = "base"
+)
+
+// Template is software installed on top of an OS.
+type Template struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Sizes       []string `json:"sizes"`
+	image       string
+}
+
+// OS is a base operating system and the templates available on it.
+type OS struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Templates []Template `json:"templates"`
+}
+
+var catalog = []OS{{
+	ID:   "alpine",
+	Name: "Alpine Linux 3.22",
+	Templates: []Template{
+		{ID: "base", Name: "Base", Description: "Python 3.12, Node 22, git", image: Default},
+		{ID: "agents", Name: "Agents", Description: "Base plus Claude Code and Codex", image: "agents"},
+	},
+}}
+
+// Catalog returns the OS and template choices, each template with its sizes.
+func Catalog() []OS {
+	out := make([]OS, len(catalog))
+	for i, os := range catalog {
+		out[i] = OS{ID: os.ID, Name: os.Name, Templates: make([]Template, len(os.Templates))}
+		for j, t := range os.Templates {
+			t.Sizes = Sizes(t.image)
+			out[i].Templates[j] = t
+		}
+	}
+	return out
+}
+
+// Resolve returns the image to boot for a create request. os and template win
+// (each defaulting when only the other is given); without them the legacy image
+// field is used as before. An image that disagrees with os/template is an error.
+func Resolve(os, template, image string) (string, error) {
+	os = strings.ToLower(strings.TrimSpace(os))
+	template = strings.ToLower(strings.TrimSpace(template))
+	if os == "" && template == "" {
+		return Normalize(image)
+	}
+	if os == "" {
+		os = DefaultOS
+	}
+	if template == "" {
+		template = DefaultTemplate
+	}
+	for _, o := range catalog {
+		if o.ID != os {
+			continue
+		}
+		for _, t := range o.Templates {
+			if t.ID != template {
+				continue
+			}
+			if image != "" {
+				if normalized, err := Normalize(image); err != nil || normalized != t.image {
+					return "", fmt.Errorf("image %q conflicts with os %q and template %q", image, os, template)
+				}
+			}
+			return t.image, nil
+		}
+		return "", fmt.Errorf("unknown template %q for os %q (available: %s)", template, os, strings.Join(templateIDs(o), ", "))
+	}
+	return "", fmt.Errorf("unknown os %q (available: %s)", os, strings.Join(osIDs(), ", "))
+}
+
+// Describe returns the OS and template an image belongs to, or empty strings for
+// images outside the catalog.
+func Describe(image string) (os, template string) {
+	for _, o := range catalog {
+		for _, t := range o.Templates {
+			if t.image == image {
+				return o.ID, t.ID
+			}
+		}
+	}
+	return "", ""
+}
+
+func osIDs() []string {
+	ids := make([]string, len(catalog))
+	for i, o := range catalog {
+		ids[i] = o.ID
+	}
+	return ids
+}
+
+func templateIDs(o OS) []string {
+	ids := make([]string, len(o.Templates))
+	for i, t := range o.Templates {
+		ids[i] = t.ID
+	}
+	return ids
+}

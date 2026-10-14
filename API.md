@@ -122,7 +122,9 @@ Request fields:
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | no | Dashboard label; defaults to `sandbox` |
-| `image` | string | no | Immutable boot image identifier; defaults to `alpine` |
+| `os` | string | no | Base OS; defaults to `alpine`. Choices: `GET /v1/catalog` |
+| `template` | string | no | Software on top of the OS: `base` (default) or `agents` (Claude Code + Codex) |
+| `image` | string | no | Legacy image id (`alpine`, `agents`), used only when `os` and `template` are unset; a value that disagrees with them is rejected |
 | `metadata` | object | no | Caller-owned labels stored with the sandbox |
 | `env` | object of strings | no | Environment injected into guest executions |
 | `size` | string | no | `nano`, `small`, or `medium`; defaults to `nano` |
@@ -481,6 +483,29 @@ single-use token, sets a host-only `__Host-renderops_ide` Secure, HttpOnly
 cookie, and redirects to the same URL without the token. The IDE cookie lasts
 one hour and is valid only for that sandbox hostname and port. It is stripped
 before proxying the request to the worker and OpenVSCode Server.
+
+## Catalog
+
+### `GET /v1/catalog`
+
+Lists what `POST /session` accepts: each OS, the templates available on it with
+the sizes each template runs at, and the size specs.
+
+```json
+{
+  "os": [{
+    "id": "alpine", "name": "Alpine Linux 3.22",
+    "templates": [
+      {"id": "base", "name": "Base", "description": "Python 3.12, Node 22, git", "sizes": ["nano", "small", "medium"]},
+      {"id": "agents", "name": "Agents", "description": "Base plus Claude Code and Codex", "sizes": ["large"]}
+    ]
+  }],
+  "sizes": [{"name": "nano", "vcpus": 1, "memory_mb": 256, "disk_gb": 1}, "..."]
+}
+```
+
+A create request for a template at a size it does not list fails with `400
+size_not_available`; an unknown OS or template fails with `400 invalid_template`.
 
 ## Port Previews
 
