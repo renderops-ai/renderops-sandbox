@@ -1,0 +1,55 @@
+name: Agents image
+
+# Builds the agents rootfs (Claude Code, Codex) and uploads it to Azure Blob as
+# rootfs-release/agents/<version>/rootfs.ext4 (gzip) + SHA256SUMS. Workers serve
+# it once "agents <version> <sha256>" is pinned in ops/worker/images.lock and
+# the workers are redeployed.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build agents rootfs
+        run: |
+          docker build --platform linux/amd64 --file Dockerfile.rootfs \
+            --build-arg ALPINE=alpine:3.22 \
+            --target agents-rootfs-export \
+            --output type=local,dest=/tmp/agents .
+          ls -la /tmp/agents
+
+      - name: Upload to Blob
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.BLOB_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.BLOB_SECRET_KEY }}
+          CONTAINER: ${{ secrets.BLOB_CONTAINER_NAME }}
+        run: |
+          version="agents-$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}"
+          prefix="rootfs-release/agents/$version"
+          sha="$(sha256sum /tmp/agents/rootfs-agents.ext4 | cut -d' ' -f1)"
+          if [ "$(az storage blob exists --container-name "$CONTAINER" --name "$prefix/rootfs.ext4" --query exists -o tsv --only-show-errors)" = true ]; then
+            echo "$prefix already exists"
+            exit 1
+          fi
+          # Workers read it through CompressedStore, which gunzips on download.
+          gzip -1 -c /tmp/agents/rootfs-agents.ext4 > /tmp/agents/rootfs.ext4.gz
+          az storage blob upload --container-name "$CONTAINER" --name "$prefix/rootfs.ext4" \
+            --file /tmp/agents/rootfs.ext4.gz --overwrite false --only-show-errors > /dev/null
+          printf '%s  rootfs.ext4\n' "$sha" > /tmp/agents/SHA256SUMS
+          az storage blob upload --container-name "$CONTAINER" --name "$prefix/SHA256SUMS" \
+            --file /tmp/agents/SHA256SUMS --overwrite false --only-show-errors > /dev/null
+          ls -la /tmp/agents/rootfs.ext4.gz
+          echo "Pin in ops/worker/images.lock:"
+          echo "agents $version $sha" | tee -a "$GITHUB_STEP_SUMMARY"

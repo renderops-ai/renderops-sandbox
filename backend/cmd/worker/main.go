@@ -237,18 +237,20 @@ func main() {
 		sandboximage.Default: baseCfg,
 	}
 	defaultTemplate := resolvedTemplates[vmsize.Default().Key()]
-	sizeTemplates := make(map[string]*firecracker.SnapshotTemplate, len(imageConfigs)*len(resolvedTemplates))
-	for image := range imageConfigs {
-		for sizeKey, tmpl := range resolvedTemplates {
-			sizeTemplates[sandboximage.PoolKey(image, sizeKey)] = tmpl
-		}
+	sizeTemplates := make(map[string]*firecracker.SnapshotTemplate, len(resolvedTemplates))
+	for sizeKey, tmpl := range resolvedTemplates {
+		sizeTemplates[sandboximage.PoolKey(sandboximage.Default, sizeKey)] = tmpl
+	}
+	// Pinned extra images (WORKER_IMAGES, e.g. agents); one that fails is left out.
+	for key, tmpl := range addExtraImages(context.Background(), cfg, vmManager, baseCfg, imageConfigs) {
+		sizeTemplates[key] = tmpl
 	}
 
 	// One session pool per size (vmsize.Sizes is the single source of truth). cgroup
 	// limits are derived from the size, matching the monolith.
 	sizePools := make(map[string]*firecracker.VMPool, len(imageConfigs)*len(vmsize.Sizes))
 	for image, imageCfg := range imageConfigs {
-		for _, sz := range vmsize.Sizes {
+		for _, sz := range imageSizes(image) {
 			szCfg := imageCfg
 			szCfg.VCPUCount = sz.VCPUs
 			szCfg.MemSizeMiB = sz.MemoryMB

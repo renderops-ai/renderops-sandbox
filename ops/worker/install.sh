@@ -15,6 +15,7 @@
 #        BLOB_STORAGE_ACCOUNT, BLOB_CONTAINER_NAME, BLOB_SECRET_KEY
 #        KERNEL_FILE, KERNEL_SHA256, KERNEL_RELEASE (optional, all or none:
 #        activates a guest kernel from ops/worker/kernel.lock)
+#        WORKER_IMAGES (extra images from ops/worker/images.lock; empty removes them)
 set -euo pipefail
 
 BINARY="${1:?usage: install-worker.sh <binary>}"
@@ -56,6 +57,14 @@ if [ -n "${KERNEL_FILE:-}" ] || [ -n "${KERNEL_SHA256:-}" ] || [ -n "${KERNEL_RE
 	DEPLOY_KERNEL_RELEASE="$KERNEL_RELEASE"
 fi
 
+# Embedded in the remote command line below.
+case "${WORKER_IMAGES:-}" in
+*[!a-z0-9A-Z._@=,-]*)
+	echo "invalid WORKER_IMAGES" >&2
+	exit 1
+	;;
+esac
+
 for value in "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
 	[ -z "$value" ] && continue
 	case "$value" in
@@ -94,7 +103,7 @@ fi
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' BLOB_STORAGE_ACCOUNT='${BLOB_STORAGE_ACCOUNT:-}' BLOB_CONTAINER_NAME='${BLOB_CONTAINER_NAME:-}' BLOB_SECRET_KEY='${BLOB_SECRET_KEY:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' KERNEL_RELEASE='${DEPLOY_KERNEL_RELEASE}' KERNEL_SHA256='${KERNEL_SHA256:-}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' BLOB_STORAGE_ACCOUNT='${BLOB_STORAGE_ACCOUNT:-}' BLOB_CONTAINER_NAME='${BLOB_CONTAINER_NAME:-}' BLOB_SECRET_KEY='${BLOB_SECRET_KEY:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' KERNEL_RELEASE='${DEPLOY_KERNEL_RELEASE}' KERNEL_SHA256='${KERNEL_SHA256:-}' WORKER_IMAGES='${WORKER_IMAGES:-}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -132,6 +141,12 @@ set_env_value BLOB_SECRET_KEY "${BLOB_SECRET_KEY:-}"
 set_env_value SANDBOX_CHECKPOINTS_ENABLED true
 set_env_value SANDBOX_CHECKPOINT_CONTAINER_NAME "${BLOB_CONTAINER_NAME:-}"
 set_env_value SANDBOX_CHECKPOINT_PREFIX sandbox-checkpoints
+# Extra images follow ops/worker/images.lock exactly, including removal.
+if [ -n "${WORKER_IMAGES:-}" ]; then
+  set_env_value WORKER_IMAGES "$WORKER_IMAGES"
+else
+  sed -i '/^WORKER_IMAGES=/d' /etc/renderops/worker.env
+fi
 
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker
 install -D -m 0644 /tmp/renderops-worker.service.new /etc/systemd/system/renderops-worker.service

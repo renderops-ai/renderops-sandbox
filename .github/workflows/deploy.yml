@@ -390,6 +390,8 @@ jobs:
             export KERNEL_RELEASE="$(sed -n 's/^KERNEL_RELEASE=//p' ops/worker/kernel.lock)"
             export KERNEL_SHA256="$(sed -n 's/^KERNEL_SHA256=//p' ops/worker/kernel.lock)"
           fi
+          WORKER_IMAGES="$(awk '!/^#/ && NF == 3 { printf "%s%s=%s@%s", sep, $1, $2, $3; sep = "," }' ops/worker/images.lock)"
+          export WORKER_IMAGES
           bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:
           SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
@@ -455,6 +457,8 @@ jobs:
             export KERNEL_RELEASE="$(sed -n 's/^KERNEL_RELEASE=//p' ops/worker/kernel.lock)"
             export KERNEL_SHA256="$(sed -n 's/^KERNEL_SHA256=//p' ops/worker/kernel.lock)"
           fi
+          WORKER_IMAGES="$(awk '!/^#/ && NF == 3 { printf "%s%s=%s@%s", sep, $1, $2, $3; sep = "," }' ops/worker/images.lock)"
+          export WORKER_IMAGES
           bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:
           SSH_KEY: ${{ secrets.WORKER_2_SSH_KEY }}
