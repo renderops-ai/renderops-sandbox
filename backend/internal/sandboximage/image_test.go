@@ -33,3 +33,22 @@ func TestPoolKeySeparatesImageAndSize(t *testing.T) {
 		t.Fatalf("PoolKey() = %q", got)
 	}
 }
+
+func TestSizeAllowed(t *testing.T) {
+	cases := []struct {
+		image, size string
+		want        bool
+	}{
+		{Default, "nano", true},
+		{Default, "medium", true},
+		{Default, "large", false},
+		{"agents", "large", true},
+		{"agents", "nano", false},
+		{"custom-image", "large", true}, // unknown images are left to worker routing
+	}
+	for _, c := range cases {
+		if got := SizeAllowed(c.image, c.size); got != c.want {
+			t.Errorf("SizeAllowed(%q, %q) = %v, want %v", c.image, c.size, got, c.want)
+		}
+	}
+}

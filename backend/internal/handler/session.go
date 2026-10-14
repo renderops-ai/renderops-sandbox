@@ -86,6 +86,17 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				})
 				return
 			}
+			if !sandboximage.SizeAllowed(image, size.Name) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(APIError{
+					Status:    "error",
+					Code:      "size_not_available",
+					Message:   fmt.Sprintf("image %q does not run at size %q (allowed: %s)", image, size.Name, strings.Join(sandboximage.Sizes(image), ", ")),
+					RequestID: requestID,
+				})
+				return
+			}
 
 			internet := true // default: egress on
 			if createReq.Network != nil && createReq.Network.Internet != nil {

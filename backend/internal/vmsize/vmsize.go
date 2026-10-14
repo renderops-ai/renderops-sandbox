@@ -21,6 +21,14 @@ var Sizes = []Size{
 	{Name: "medium", VCPUs: 2, MemoryMB: 1024, DiskGB: 20},
 }
 
+// Large is for images that need more memory (the agents image). It is not in
+// Sizes: standard pools, templates and prebuilt releases are built for Sizes
+// only, and package sandboximage decides which image may run at which size.
+var Large = Size{Name: "large", VCPUs: 2, MemoryMB: 4096, DiskGB: 20}
+
+// All returns every size a sandbox can be created with.
+func All() []Size { return append(append([]Size(nil), Sizes...), Large) }
+
 // Default returns the default size (used when a create request omits resources).
 func Default() Size { return Sizes[0] }
 
@@ -56,7 +64,7 @@ func Resolve(vcpus, memoryMB, diskGB int) (Size, error) {
 	if vcpus == 0 && memoryMB == 0 && diskGB == 0 {
 		return Default(), nil
 	}
-	for _, s := range Sizes {
+	for _, s := range All() {
 		if s.VCPUs == vcpus && s.MemoryMB == memoryMB && s.DiskGB == diskGB {
 			return s, nil
 		}
@@ -66,7 +74,7 @@ func Resolve(vcpus, memoryMB, diskGB int) (Size, error) {
 
 // ByName resolves a size by its menu name ("nano", "small", ...).
 func ByName(name string) (Size, error) {
-	for _, s := range Sizes {
+	for _, s := range All() {
 		if s.Name == name {
 			return s, nil
 		}
@@ -76,7 +84,7 @@ func ByName(name string) (Size, error) {
 
 func menu() string {
 	out := ""
-	for i, s := range Sizes {
+	for i, s := range All() {
 		if i > 0 {
 			out += ", "
 		}
