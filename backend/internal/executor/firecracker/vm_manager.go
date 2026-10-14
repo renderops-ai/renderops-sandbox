@@ -932,6 +932,10 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 		SnapshotVsockPath: tmpl.VsockPath,
 		SnapshotTapName:   tmpl.TapName,
 	}
+	// Record the rootfs this VM actually runs on. On resume cfg is the manager's
+	// default config, and pause saves Config.RootfsPath for the next resume, so a
+	// sandbox on another image would come back on the default rootfs.
+	vm.Config.RootfsPath = tmpl.RootfsPath
 
 	f.mu.Lock()
 	f.Vms[vmID] = vm
