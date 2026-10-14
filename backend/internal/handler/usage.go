@@ -79,11 +79,18 @@ func billRuntimeAsync(logger platform.UsageLogger, sandboxID string, ratePerSec 
 // (sandbox_logs, tagged with the run id) so the dashboard can list runs and, per run,
 // show its stdout/stderr. Best-effort, off the request path.
 func recordRunAsync(w platform.UsageLogger, run platform.SandboxRun, stdout, stderr string) {
+	recordRunOutputAsync(w, run, stdout, stderr, false)
+}
+
+func recordRunOutputAsync(w platform.UsageLogger, run platform.SandboxRun, stdout, stderr string, captured bool) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		run.Command = truncate(run.Command, 8*1024)
 		w.InsertSandboxRun(ctx, run)
+		if captured {
+			return
+		} // Output already arrives via the worker's durable feed.
 		// stderr is warn by default, but error when the run itself failed/timed out.
 		stderrLevel := "warn"
 		if run.Status == "error" || run.Status == "timeout" {

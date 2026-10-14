@@ -53,6 +53,8 @@ if [ ! -f "$ENV_FILE" ]; then
 		printf 'WORKER_MAX_TERMINALS_PER_SANDBOX=%s\n' "${WORKER_MAX_TERMINALS_PER_SANDBOX:-8}"
 		printf 'ORCHESTRATOR_URL=%s\n' "${ORCHESTRATOR_URL:-}"
 		printf 'CONTROL_PLANE_INTERNAL_URL=%s\n' "${CONTROL_PLANE_INTERNAL_URL:-}"
+		printf 'WORKER_LOG_INGEST_URL=%s\n' "${WORKER_LOG_INGEST_URL:-}"
+		printf 'WORKER_LOG_SPOOL_DIR=%s\n' "${WORKER_LOG_SPOOL_DIR:-$WORKER_ROOT/logs/pending}"
 		printf 'HOST_VALIDATION_MODE=strict\n'
 		# SLOT_COUNT is intentionally omitted. The worker derives active network
 		# slots from physical vCPUs x CPU overcommit, capped by max sessions.

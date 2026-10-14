@@ -462,8 +462,8 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = io.MultiWriter(&stdout, outputWriter("stdout"))
+	cmd.Stderr = io.MultiWriter(&stderr, outputWriter("stderr"))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -596,20 +596,23 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 // Type == "exec"              → run a shell command in the persistent bash session.
 // Type == "" (default)        → code execution request.
 type incomingMessage struct {
-	Type       string            `json:"type"`
-	Code       string            `json:"code"`
-	Language   string            `json:"language"`
-	Timeout    int               `json:"timeout"`
-	Mode       string            `json:"mode"`
-	GuestIP    string            `json:"guest_ip"`
-	GWIP       string            `json:"gw_ip"`
-	Command    string            `json:"command"`
-	Env        map[string]string `json:"env"`
-	TerminalID string            `json:"terminal_id"`
-	Hostname   string            `json:"hostname"`
-	Shell      string            `json:"shell"`
-	Columns    uint16            `json:"columns"`
-	Rows       uint16            `json:"rows"`
+	LogSandboxID string            `json:"log_sandbox_id"`
+	LogEpoch     string            `json:"log_epoch"`
+	LogAfter     uint64            `json:"log_after"`
+	Type         string            `json:"type"`
+	Code         string            `json:"code"`
+	Language     string            `json:"language"`
+	Timeout      int               `json:"timeout"`
+	Mode         string            `json:"mode"`
+	GuestIP      string            `json:"guest_ip"`
+	GWIP         string            `json:"gw_ip"`
+	Command      string            `json:"command"`
+	Env          map[string]string `json:"env"`
+	TerminalID   string            `json:"terminal_id"`
+	Hostname     string            `json:"hostname"`
+	Shell        string            `json:"shell"`
+	Columns      uint16            `json:"columns"`
+	Rows         uint16            `json:"rows"`
 }
 
 var terminals = newTerminalManager(maxGuestTerminals)
@@ -911,6 +914,7 @@ func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr stri
 				return
 			}
 			lines = append(lines, line)
+			outputLogs.write("stdout", []byte(line+"\n"))
 		}
 		ch <- shellResult{nil, -1, fmt.Errorf("shell process died")}
 	}()
@@ -928,6 +932,7 @@ func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr stri
 			stdout = strings.Join(r.lines, "\n") + "\n"
 		}
 		stderrBytes, _ := os.ReadFile(stderrFile)
+		outputLogs.write("stderr", stderrBytes)
 		return stdout, string(stderrBytes), r.exitCode, nil
 	case <-time.After(time.Duration(timeoutSec) * time.Second):
 		return "", "", -1, fmt.Errorf("command timed out after %ds", timeoutSec)
@@ -1020,6 +1025,10 @@ func handleConnection(connFd int) {
 			handleExec(conn, msg.Command, msg.Timeout)
 			continue
 		}
+		if msg.Type == "logs_follow" {
+			_ = outputLogs.follow(conn, msg.LogSandboxID, msg.LogEpoch, msg.LogAfter)
+			return
+		}
 		if msg.Type == "terminal_open" {
 			err := terminals.Open(terminalOpenRequest{
 				ID: msg.TerminalID, Hostname: msg.Hostname, Shell: msg.Shell, Columns: msg.Columns, Rows: msg.Rows, Env: msg.Env,
@@ -1070,6 +1079,11 @@ func handleConnection(connFd int) {
 		}
 		log.Printf("execute language=%s code_len=%d", req.Language, len(req.Code))
 		resp := executeCode(req)
+		// Stateful kernel bridges only expose output once a cell finishes.
+		if req.Language == "node" || (req.Mode == "stateful" && req.Language == "python") {
+			outputLogs.write("stdout", []byte(resp.Stdout))
+			outputLogs.write("stderr", []byte(resp.Stderr))
+		}
 		log.Printf("done exit_code=%d duration=%.2fs", resp.ExitCode, resp.Duration)
 
 		if err := json.NewEncoder(conn).Encode(resp); err != nil {

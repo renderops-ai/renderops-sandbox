@@ -21,9 +21,9 @@ func (c *Client) InsertUsageLog(ctx context.Context, entry UsageLog) {
 	_, err := c.pool.Exec(ctx, `
 		INSERT INTO usage_logs
 		(api_key_id, user_id, execution_type, language, duration_ms, exit_code, cost_usd, stdout, stderr)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL)`,
 		entry.APIKeyID, entry.UserID, entry.ExecutionType, entry.Language,
-		entry.DurationMs, entry.ExitCode, entry.CostUSD, entry.Stdout, entry.Stderr,
+		entry.DurationMs, entry.ExitCode, entry.CostUSD,
 	)
 	if err != nil {
 		slog.Warn("usage log insert failed", "err", err)

@@ -287,7 +287,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			})
 			// Wall-clock sandbox time is what burns credit (not just this command).
 			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
-			recordRunAsync(usageLogger, platform.SandboxRun{
+			recordRunOutputAsync(usageLogger, platform.SandboxRun{
 				ID:         uuid.NewString(),
 				SandboxID:  sessionID,
 				UserID:     auth.TenantID,
@@ -298,7 +298,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Status:     runStatus(int(result.ExitCode), result.TerminationReason),
 				DurationMs: int(execDurationMs),
 				StartedAt:  start.UTC().Format(time.RFC3339Nano),
-			}, result.Stdout, result.Stderr)
+			}, result.Stdout, result.Stderr, result.OutputLogsCaptured)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(runResp)
@@ -388,7 +388,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
 			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
-			recordRunAsync(usageLogger, platform.SandboxRun{
+			recordRunOutputAsync(usageLogger, platform.SandboxRun{
 				ID:         uuid.NewString(),
 				SandboxID:  sessionID,
 				UserID:     auth.TenantID,
@@ -399,7 +399,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Status:     runStatus(int(result.ExitCode), result.TerminationReason),
 				DurationMs: int(execDurationMs),
 				StartedAt:  start.UTC().Format(time.RFC3339Nano),
-			}, result.Stdout, result.Stderr)
+			}, result.Stdout, result.Stderr, result.OutputLogsCaptured)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(execResp)

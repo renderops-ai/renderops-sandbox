@@ -72,12 +72,13 @@ type ExecRequest struct {
 // ExecResult is the wire form of an execution outcome. Field tags stay in
 // lockstep with executor.ExecutionResult, which the agent encodes directly.
 type ExecResult struct {
-	Stdout            string  `json:"stdout"`
-	Stderr            string  `json:"stderr"`
-	Duration          float64 `json:"duration"`
-	GuestDuration     float64 `json:"guest_duration"`
-	ExitCode          int64   `json:"exit_code"`
-	TerminationReason string  `json:"termination_reason,omitempty"`
+	OutputLogsCaptured bool    `json:"output_logs_captured,omitempty"`
+	Stdout             string  `json:"stdout"`
+	Stderr             string  `json:"stderr"`
+	Duration           float64 `json:"duration"`
+	GuestDuration      float64 `json:"guest_duration"`
+	ExitCode           int64   `json:"exit_code"`
+	TerminationReason  string  `json:"termination_reason,omitempty"`
 }
 
 // Capacity is the worker-authoritative resource snapshot published to the

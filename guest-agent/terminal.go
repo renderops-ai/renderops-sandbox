@@ -215,6 +215,7 @@ func (m *terminalManager) capture(session *terminalSession) {
 	for {
 		n, err := session.master.Read(buffer)
 		if n > 0 {
+			outputLogs.write("stdout", buffer[:n])
 			session.publish(buffer[:n])
 		}
 		if err != nil {

@@ -215,13 +215,27 @@ type SandboxLog struct {
 }
 
 func (c *Client) InsertSandboxLog(ctx context.Context, entry SandboxLog) {
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		slog.Warn("sandbox log transaction failed", "err", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(1397772108)`); err != nil {
+		slog.Warn("sandbox log ordering failed", "err", err)
+		return
+	}
 	var runID any
 	if entry.RunID != "" {
 		runID = entry.RunID
 	}
-	_, err := c.pool.Exec(ctx, `INSERT INTO sandbox_logs (sandbox_id,run_id,user_id,stream,level,language,content) VALUES ($1,$2,$3,$4,$5,$6,$7)`, entry.SandboxID, runID, entry.UserID, entry.Stream, entry.Level, entry.Language, entry.Content)
+	_, err = tx.Exec(ctx, `INSERT INTO sandbox_logs (sandbox_id,run_id,user_id,stream,level,language,content) VALUES ($1,$2,$3,$4,$5,$6,$7)`, entry.SandboxID, runID, entry.UserID, entry.Stream, entry.Level, entry.Language, entry.Content)
 	if err != nil {
 		slog.Warn("sandbox log insert failed", "err", err)
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
+		slog.Warn("sandbox log commit failed", "err", err)
 	}
 }
 

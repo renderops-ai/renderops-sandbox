@@ -9,6 +9,7 @@ import (
 	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
 	"backend/internal/ideauth"
+	"backend/internal/logstream"
 	"backend/internal/metering"
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
@@ -64,6 +65,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer platformClient.Close()
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	defer stopRetention()
+	go platformClient.RunLogRetention(retentionCtx)
 
 	executionPolicy, err := platformClient.LoadExecutionPolicy(context.Background())
 	if err != nil {
@@ -113,6 +117,7 @@ func main() {
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)
 	rootMux.Handle(metering.Route, metering.Handler(platformClient, cfg.WorkerToken))
+	rootMux.Handle(logstream.Route, logstream.Handler(platformClient, cfg.WorkerToken))
 	rootMux.HandleFunc("GET /v1/terminals/{terminalID}", handler.AttachTerminalHandler(orchestratorClient, terminalWorkers, terminalManager, cfg.TerminalAllowedOrigins))
 	rootMux.Handle("/", middleware.Auth(platformClient, executionPolicy, billingConfig)(publicMux))
 

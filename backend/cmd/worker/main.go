@@ -8,6 +8,8 @@ import (
 	"backend/internal/checkpoint"
 	"backend/internal/executor/firecracker"
 	"backend/internal/ide"
+	"backend/internal/logagent"
+	"backend/internal/logstream"
 	"backend/internal/metering"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
@@ -397,6 +399,22 @@ func main() {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
 	workerServer := worker.NewServerWithAdmission(sessionMgr, token, admission)
+	// Reuse the host worker process, with an independently configurable endpoint.
+	if endpoint := env("WORKER_LOG_INGEST_URL", ""); endpoint != "" {
+		collector, err := logagent.New(env("WORKER_LOG_SPOOL_DIR", filepath.Join(cfg.RootDirectory, "logs", "pending")), endpoint, token, os.Getenv("WORKER_ID"))
+		if err != nil {
+			slog.Error("configure output log collector", "err", err)
+			os.Exit(1)
+		}
+		logCtx, stopLogs := context.WithCancel(context.Background())
+		defer stopLogs()
+		defer collector.Close()
+		go collector.Run(logCtx)
+		sessionMgr.SetLogCollector(collector.Watch, collector.Stop)
+		slog.Info("worker output collector enabled", "endpoint", endpoint, "retention_hours", int(logstream.Retention.Hours()))
+	} else {
+		slog.Warn("worker output collector disabled; set WORKER_LOG_INGEST_URL")
+	}
 	ideManager, err := ide.NewService(sessionMgr, ide.Config{
 		Binary:    env("IDE_BINARY", "/opt/openvscode-server/bin/openvscode-server"),
 		Workspace: env("IDE_WORKSPACE", "/workspace"),

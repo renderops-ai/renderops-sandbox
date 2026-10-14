@@ -64,6 +64,9 @@ type CheckpointReader interface {
 }
 
 type Manager struct {
+	logMu            sync.RWMutex
+	logStart         func(string, string)
+	logStop          func(string)
 	store            *Store
 	onState          StateHook
 	onMeter          MeterHook
@@ -450,6 +453,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 	}
 
 	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "billing_model", billingModel, "warm", warm, "ms", time.Since(t0).Milliseconds())
+	m.startLogs(sess.ID, sess.VM.VsockPath)
 	return sess, nil
 }
 
@@ -592,12 +596,13 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 	sess.LastExitCode = &exitCode
 
 	return executor.ExecutionResult{
-		Stdout:            resp.Stdout,
-		Stderr:            resp.Stderr,
-		Duration:          resp.Duration,
-		GuestDuration:     resp.Duration,
-		ExitCode:          int64(resp.ExitCode),
-		TerminationReason: "success",
+		OutputLogsCaptured: m.logsEnabled(),
+		Stdout:             resp.Stdout,
+		Stderr:             resp.Stderr,
+		Duration:           resp.Duration,
+		GuestDuration:      resp.Duration,
+		ExitCode:           int64(resp.ExitCode),
+		TerminationReason:  "success",
 	}, nil
 }
 
@@ -635,18 +640,20 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string,
 	sess.LastExitCode = &exitCode
 
 	return executor.ExecutionResult{
-		Stdout:            resp.Stdout,
-		Stderr:            resp.Stderr,
-		Duration:          resp.Duration,
-		GuestDuration:     resp.Duration,
-		ExitCode:          int64(resp.ExitCode),
-		TerminationReason: "success",
+		OutputLogsCaptured: m.logsEnabled(),
+		Stdout:             resp.Stdout,
+		Stderr:             resp.Stderr,
+		Duration:           resp.Duration,
+		GuestDuration:      resp.Duration,
+		ExitCode:           int64(resp.ExitCode),
+		TerminationReason:  "success",
 	}, nil
 }
 
 // Destroy tears down a session. For an active session this releases its VM; for a paused
 // session there is no live VM, so it just deletes the on-disk snapshot + writable disk.
 func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
+	m.stopLogs(sessionID)
 	sess, ok := m.store.Delete(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
@@ -737,9 +744,15 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 		}
 		sess.Terminals = nil
 	}
+	m.stopLogs(sessionID)
 
 	t0 := time.Now()
 	snapDir := filepath.Join(m.pauseDir, sessionID)
+	defer func() {
+		if sess.State == StateActive && sess.VM != nil {
+			m.startLogs(sess.ID, sess.VM.VsockPath)
+		}
+	}()
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return fmt.Errorf("create pause dir: %w", err)
 	}
@@ -988,6 +1001,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	m.meterSession(sess, StatePaused, time.Now())
 	sess.State = StateActive
 	sess.LastUsed = time.Now()
+	m.startLogs(sess.ID, vm.VsockPath)
 
 	// The mem/snap files are consumed by the restore; the disk persists. Clean them up.
 	os.Remove(sess.SnapPath)
