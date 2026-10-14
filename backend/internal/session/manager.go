@@ -59,6 +59,12 @@ type CheckpointWriter interface {
 	Save(context.Context, checkpoint.Input) (string, error)
 }
 
+// CheckpointDeleter removes all durable checkpoints of a sandbox. The checkpoint
+// writer implements it; Destroy uses it so a deleted sandbox leaves no data behind.
+type CheckpointDeleter interface {
+	DeleteSandbox(context.Context, string) (int, error)
+}
+
 type CheckpointReader interface {
 	Restore(context.Context, string, string, checkpoint.RestorePaths) (checkpoint.RestoreResult, error)
 }
@@ -662,6 +668,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 
 	if sess.State == StatePaused {
 		m.cleanupPausedFiles(sess)
+		m.purgeCheckpoints(sessionID)
 		m.persistManifest()
 		if err := m.notifyState(sess, "destroyed"); err != nil {
 			return err
@@ -695,6 +702,8 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 			}
 		}
 	}
+	// A sandbox paused and resumed earlier still has checkpoints in Blob.
+	m.purgeCheckpoints(sessionID)
 
 	if err := m.notifyState(sess, "destroyed"); err != nil {
 		return err
@@ -1079,6 +1088,33 @@ func (m *Manager) ensureActive(ctx context.Context, sessionID string) error {
 }
 
 // cleanupPausedFiles deletes a paused session's on-disk artifacts (snapshot + writable disk).
+// purgeCheckpoints deletes a destroyed sandbox's durable checkpoints in the
+// background, retrying transient object-storage errors, so Destroy never waits
+// on Blob. A failure that outlasts the retries is logged for cleanup.
+func (m *Manager) purgeCheckpoints(sessionID string) {
+	deleter, ok := m.checkpoints.(CheckpointDeleter)
+	if !ok {
+		return
+	}
+	go func() {
+		delays := []time.Duration{0, 10 * time.Second, time.Minute, 5 * time.Minute}
+		for attempt, delay := range delays {
+			time.Sleep(delay)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			deleted, err := deleter.DeleteSandbox(ctx, sessionID)
+			cancel()
+			if err == nil {
+				if deleted > 0 {
+					slog.Info("sandbox checkpoints deleted", "session_id", sessionID, "objects", deleted)
+				}
+				return
+			}
+			slog.Warn("delete sandbox checkpoints failed", "session_id", sessionID, "attempt", attempt+1, "err", err)
+		}
+		slog.Error("sandbox checkpoints left in object storage", "session_id", sessionID)
+	}()
+}
+
 func (m *Manager) cleanupPausedFiles(sess *Session) {
 	if sess.WritableDiskPath != "" {
 		if err := m.vmManager.DeleteWritableDisk(context.Background(), sess.WritableDiskPath); err != nil {

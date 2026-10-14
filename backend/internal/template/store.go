@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -98,6 +99,18 @@ func (s *LocalStore) Put(_ context.Context, key string, r io.Reader) error {
 	if err := os.Rename(tmpName, full); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("commit %s: %w", key, err)
+	}
+	return nil
+}
+
+// Delete removes key. A key that does not exist is not an error.
+func (s *LocalStore) Delete(_ context.Context, key string) error {
+	full, err := s.resolve(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("delete %s: %w", key, err)
 	}
 	return nil
 }

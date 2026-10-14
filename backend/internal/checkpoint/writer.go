@@ -13,6 +13,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"backend/internal/template"
@@ -110,6 +111,71 @@ func NewWriter(store template.ArtifactStore, prefix string) (*Writer, error) {
 		return nil, fmt.Errorf("invalid checkpoint prefix %q", prefix)
 	}
 	return &Writer{store: store, prefix: prefix, chunkSize: defaultChunkSize, now: time.Now}, nil
+}
+
+// objectDeleter is the part of a store DeleteSandbox needs.
+type objectDeleter interface {
+	Delete(ctx context.Context, key string) error
+}
+
+// deleteConcurrency bounds parallel deletes; a sandbox has one object per disk chunk.
+const deleteConcurrency = 8
+
+// DeleteSandbox removes every checkpoint object of a sandbox: all generations,
+// disk chunks and latest.json. latest.json goes first so a reader never follows
+// a pointer into a half-deleted generation. Objects already gone are fine.
+// Returns how many objects were deleted.
+func (w *Writer) DeleteSandbox(ctx context.Context, sandboxID string) (int, error) {
+	// A UUID can never be empty or contain "/", so this cannot widen to the prefix.
+	if _, err := uuid.Parse(sandboxID); err != nil {
+		return 0, fmt.Errorf("invalid sandbox id %q: %w", sandboxID, err)
+	}
+	store, ok := w.store.(objectDeleter)
+	if !ok {
+		return 0, fmt.Errorf("checkpoint store cannot delete objects")
+	}
+	base := path.Join(w.prefix, sandboxID) + "/"
+	keys, err := w.store.List(ctx, base)
+	if err != nil {
+		return 0, fmt.Errorf("list checkpoints: %w", err)
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	latest := path.Join(w.prefix, sandboxID, "latest.json")
+	if err := store.Delete(ctx, latest); err != nil {
+		return 0, fmt.Errorf("delete latest pointer: %w", err)
+	}
+
+	var (
+		mu      sync.Mutex
+		deleted = 0
+		errs    []error
+		wg      sync.WaitGroup
+		slots   = make(chan struct{}, deleteConcurrency)
+	)
+	for _, key := range keys {
+		if key == latest {
+			deleted++
+			continue
+		}
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(key string) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			err := store.Delete(ctx, key)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			deleted++
+		}(key)
+	}
+	wg.Wait()
+	return deleted, errors.Join(errs...)
 }
 
 // Save uploads VM state, memory, and only new writable-disk chunks, then commits

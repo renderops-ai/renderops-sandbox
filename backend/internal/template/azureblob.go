@@ -47,6 +47,14 @@ func (s *AzureBlobStore) Put(ctx context.Context, key string, r io.Reader) error
 	return nil
 }
 
+// Delete removes key. A key that does not exist is not an error.
+func (s *AzureBlobStore) Delete(ctx context.Context, key string) error {
+	if _, err := s.client.DeleteBlob(ctx, s.container, key, nil); err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	return nil
+}
+
 func (s *AzureBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	resp, err := s.client.DownloadStream(ctx, s.container, key, nil)
 	if err != nil {
