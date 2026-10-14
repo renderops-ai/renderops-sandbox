@@ -1185,6 +1185,7 @@ func ensurePath() {
 }
 
 func main() {
+	logToKernel()
 	ensurePath()
 	// Seed the kernel CRNG immediately. In nested-KVM (Azure/Hyper-V), the
 	// virtio-rng device fails to deliver entropy via DMA so entropy_avail
