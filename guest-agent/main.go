@@ -1101,8 +1101,12 @@ func errorString(err error) string {
 	return err.Error()
 }
 
+// listenVsock opens the host-facing listener. It and every accepted connection are
+// close-on-exec: otherwise every process the agent starts (shell, kernels, user
+// commands) holds the listener and the live host connection, and a connection the
+// agent closes stays open in the guest.
 func listenVsock() (int, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("socket: %w", err)
 	}
@@ -1230,7 +1234,7 @@ func main() {
 	log.Println("guest agent ready, waiting for connections...")
 
 	for {
-		connFd, _, err := unix.Accept(fd)
+		connFd, _, err := unix.Accept4(fd, unix.SOCK_CLOEXEC)
 		if err != nil {
 			log.Printf("accept failed (%v) — reinitializing vsock listener", err)
 			unix.Close(fd)
