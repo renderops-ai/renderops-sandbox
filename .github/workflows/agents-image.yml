@@ -25,7 +25,6 @@ jobs:
       - name: Build agents rootfs
         run: |
           docker build --platform linux/amd64 --file Dockerfile.rootfs \
-            --build-arg ALPINE=alpine:3.22 \
             --target agents-rootfs-export \
             --output type=local,dest=/tmp/agents .
           ls -la /tmp/agents

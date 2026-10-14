@@ -1162,7 +1162,30 @@ func readNetworkConfig() (guestIP, gwIP string) {
 	return
 }
 
+// standardPath is the PATH a normal Linux login gets. As PID 1 the agent inherits
+// no PATH from the kernel, so without this commands fall back to a short default
+// that lacks /usr/local/bin, where npm -g, pip and the agent CLIs install.
+const standardPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// ensurePath gives every command the agent starts (exec, terminals, bridges) a
+// PATH that includes /usr/local/bin; they all inherit the agent's environment.
+func ensurePath() {
+	path := os.Getenv("PATH")
+	if strings.Contains(":"+path+":", ":/usr/local/bin:") {
+		return
+	}
+	if path == "" {
+		path = standardPath
+	} else {
+		path = "/usr/local/sbin:/usr/local/bin:" + path
+	}
+	if err := os.Setenv("PATH", path); err != nil {
+		log.Printf("warning: set PATH: %v", err)
+	}
+}
+
 func main() {
+	ensurePath()
 	// Seed the kernel CRNG immediately. In nested-KVM (Azure/Hyper-V), the
 	// virtio-rng device fails to deliver entropy via DMA so entropy_avail
 	// stays at ~38 bits forever — below the 128 bits getrandom() requires.

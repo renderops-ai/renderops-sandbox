@@ -8,7 +8,7 @@
 #   docker build --target rootfs-export    -o type=local,dest=assets/rootfs .  → rootfs-alpine.ext4
 #   docker build --target initramfs-export -o type=local,dest=assets .         → initramfs.cpio.gz
 #
-ARG ALPINE=alpine:3.20
+ARG ALPINE=alpine:3.22
 
 # OpenVSCode is pinned and checksum-verified so rebuilding a rootfs cannot
 # silently install a different editor release. The worker gateway provides
@@ -74,8 +74,8 @@ RUN git config --global credential.helper "" \
  && printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env \
  && mkdir -p /workspace
 
-# Optional agent image. The base rootfs remains unchanged. Build with
-# ALPINE=alpine:3.22 for Node 22, then target agents-rootfs-export below.
+# Agents image: the base rootfs plus Claude Code and Codex (Node 22, from
+# Alpine 3.22). Build target agents-rootfs-export below.
 FROM rootfs AS agents-rootfs
 ARG CODEX_VERSION=0.162.1
 ARG CLAUDE_VERSION=2.1.296
