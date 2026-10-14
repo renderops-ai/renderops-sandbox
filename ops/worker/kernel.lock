@@ -4,7 +4,7 @@
 # from there). Changing these lines and running the Deploy workflow with
 # deploy_kernel=true rolls the kernel out; normal pushes never touch it.
 KERNEL_REPO=renderops-ai/spawn-kernel
-KERNEL_RELEASE=vmlinux-6.1.182-renderops.3
+KERNEL_RELEASE=vmlinux-6.1.182-renderops.4
 # sha256 of the release's vmlinux asset (from its SHA256SUMS). Deploys fail until
 # this is the real 64-character digest.
-KERNEL_SHA256=78c60b9b194f17bc4958cc66884d039715bca89d75403684f36cc9c9bd987786
+KERNEL_SHA256=223046c6db416b149713bf9465e0a202d30cd4ac7a32e96dc2f74c87975520a9
