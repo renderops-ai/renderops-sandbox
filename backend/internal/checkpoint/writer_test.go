@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,7 +183,9 @@ func writeTestFile(t *testing.T, dir, name, contents string) string {
 	return p
 }
 
+// recordingStore is safe for concurrent use: the writer uploads disk chunks in parallel.
 type recordingStore struct {
+	mu      sync.Mutex
 	objects map[string][]byte
 	order   []string
 	failAt  int
@@ -191,6 +194,8 @@ type recordingStore struct {
 func newRecordingStore() *recordingStore { return &recordingStore{objects: make(map[string][]byte)} }
 
 func (s *recordingStore) Put(_ context.Context, key string, r io.Reader) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.order = append(s.order, key)
 	if s.failAt > 0 && len(s.order) == s.failAt {
 		return fmt.Errorf("injected failure")
@@ -203,6 +208,8 @@ func (s *recordingStore) Put(_ context.Context, key string, r io.Reader) error {
 }
 
 func (s *recordingStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, ok := s.objects[key]
 	if !ok {
 		return nil, template.ErrNotFound
@@ -210,6 +217,8 @@ func (s *recordingStore) Get(_ context.Context, key string) (io.ReadCloser, erro
 	return io.NopCloser(strings.NewReader(string(b))), nil
 }
 func (s *recordingStore) Stat(_ context.Context, key string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, ok := s.objects[key]
 	return int64(len(b)), ok, nil
 }

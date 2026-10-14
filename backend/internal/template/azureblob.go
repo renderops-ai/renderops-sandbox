@@ -40,8 +40,17 @@ func NewAzureBlobStore(account, accountKey, container string) (*AzureBlobStore, 
 
 var _ ArtifactStore = (*AzureBlobStore)(nil)
 
+// Uploads are sent as blocks in parallel. The SDK default (1 MiB blocks, one at a
+// time) made a 4 GiB pause checkpoint take over a minute. One upload buffers at most
+// uploadConcurrency × uploadBlockSize; an object smaller than a block is one request.
+const (
+	uploadBlockSize   = 8 * 1024 * 1024
+	uploadConcurrency = 8
+)
+
 func (s *AzureBlobStore) Put(ctx context.Context, key string, r io.Reader) error {
-	if _, err := s.client.UploadStream(ctx, s.container, key, r, nil); err != nil {
+	opts := &azblob.UploadStreamOptions{BlockSize: uploadBlockSize, Concurrency: uploadConcurrency}
+	if _, err := s.client.UploadStream(ctx, s.container, key, r, opts); err != nil {
 		return fmt.Errorf("upload %s: %w", key, err)
 	}
 	return nil

@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"backend/internal/template"
@@ -156,7 +158,9 @@ func (w *Writer) DeleteSandbox(ctx context.Context, sandboxID string) (int, erro
 	)
 	for _, key := range keys {
 		if key == latest {
+			mu.Lock()
 			deleted++
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
@@ -191,19 +195,24 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	generation := uuid.NewString()
 	base := path.Join(w.prefix, in.SandboxID, "generations", generation)
 	createdAt := w.now().UTC()
+	start := time.Now()
 
 	snapshot, err := w.putFile(ctx, path.Join(base, "vmstate.snap"), in.SnapshotPath)
 	if err != nil {
 		return "", fmt.Errorf("upload VM state: %w", err)
 	}
+	memoryStart := time.Now()
 	memory, err := w.putFile(ctx, path.Join(base, "memory.mem"), in.MemoryPath)
 	if err != nil {
 		return "", fmt.Errorf("upload memory: %w", err)
 	}
-	writable, err := w.putDisk(ctx, in.SandboxID, in.WritableDiskPath)
+	memoryTime := time.Since(memoryStart)
+	diskStart := time.Now()
+	writable, stats, err := w.putDisk(ctx, in.SandboxID, in.WritableDiskPath)
 	if err != nil {
 		return "", fmt.Errorf("upload writable disk: %w", err)
 	}
+	diskTime := time.Since(diskStart)
 
 	manifest := Manifest{
 		Version:      manifestVersion,
@@ -230,38 +239,71 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	if err := w.putJSON(ctx, path.Join(w.prefix, in.SandboxID, "latest.json"), pointer); err != nil {
 		return "", fmt.Errorf("activate checkpoint: %w", err)
 	}
+	slog.Info("checkpoint saved", "sandbox_id", in.SandboxID, "generation", generation,
+		"memory_bytes", memory.SizeBytes, "memory_ms", memoryTime.Milliseconds(),
+		"disk_chunks", len(writable.Chunks), "disk_chunks_uploaded", stats.uploaded.Load(),
+		"disk_chunks_reused", stats.reused.Load(), "disk_ms", diskTime.Milliseconds(),
+		"ms", time.Since(start).Milliseconds())
 	return manifestKey, nil
 }
 
-func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (WritableDisk, error) {
+// diskUploadConcurrency bounds parallel chunk uploads. Each in-flight chunk holds
+// one chunk of data in memory.
+const diskUploadConcurrency = 8
+
+type diskStats struct {
+	uploaded atomic.Int64 // new chunks sent to the store
+	reused   atomic.Int64 // chunks already in the store
+}
+
+func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (WritableDisk, *diskStats, error) {
+	stats := &diskStats{}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return WritableDisk{}, fmt.Errorf("open %s: %w", filePath, err)
+		return WritableDisk{}, nil, fmt.Errorf("open %s: %w", filePath, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return WritableDisk{}, fmt.Errorf("stat %s: %w", filePath, err)
+		return WritableDisk{}, nil, fmt.Errorf("stat %s: %w", filePath, err)
 	}
 	if info.Size() <= 0 {
-		return WritableDisk{}, fmt.Errorf("writable disk %s is empty", filePath)
+		return WritableDisk{}, nil, fmt.Errorf("writable disk %s is empty", filePath)
 	}
 
 	indices, err := allocatedChunkIndices(f, info.Size(), w.chunkSize)
 	if err != nil {
-		return WritableDisk{}, fmt.Errorf("scan sparse writable disk: %w", err)
+		return WritableDisk{}, nil, fmt.Errorf("scan sparse writable disk: %w", err)
 	}
 	previous := w.previousChunks(ctx, sandboxID)
+
+	// Chunks are read and hashed in order; new ones upload in the background. The
+	// first upload error cancels the rest.
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg       sync.WaitGroup
+		slots    = make(chan struct{}, diskUploadConcurrency)
+		failOnce sync.Once
+		firstErr error
+	)
+	fail := func(err error) {
+		failOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
 	chunks := make([]DiskChunk, 0, len(indices))
 	for _, index := range indices {
-		if err := ctx.Err(); err != nil {
-			return WritableDisk{}, err
+		if uploadCtx.Err() != nil {
+			break
 		}
 		offset := index * w.chunkSize
 		size := min(w.chunkSize, info.Size()-offset)
 		data := make([]byte, size)
 		if _, err := f.ReadAt(data, offset); err != nil && !errors.Is(err, io.EOF) {
-			return WritableDisk{}, fmt.Errorf("read disk chunk %d: %w", index, err)
+			fail(fmt.Errorf("read disk chunk %d: %w", index, err))
+			break
 		}
 		if isZero(data) {
 			continue
@@ -271,20 +313,39 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 		key := path.Join(w.prefix, sandboxID, "disk-chunks", digest)
 		if old, ok := previous[index]; ok && old.SHA256 == digest {
 			key = old.Key
+			stats.reused.Add(1)
 		} else {
-			_, exists, err := w.store.Stat(ctx, key)
-			if err != nil {
-				return WritableDisk{}, fmt.Errorf("stat disk chunk %d: %w", index, err)
-			}
-			if !exists {
-				if err := w.store.Put(ctx, key, bytes.NewReader(data)); err != nil {
-					return WritableDisk{}, fmt.Errorf("upload disk chunk %d: %w", index, err)
+			wg.Add(1)
+			slots <- struct{}{}
+			go func(index int64, key string, data []byte) {
+				defer wg.Done()
+				defer func() { <-slots }()
+				_, exists, err := w.store.Stat(uploadCtx, key)
+				if err != nil {
+					fail(fmt.Errorf("stat disk chunk %d: %w", index, err))
+					return
 				}
-			}
+				if exists {
+					stats.reused.Add(1)
+					return
+				}
+				if err := w.store.Put(uploadCtx, key, bytes.NewReader(data)); err != nil {
+					fail(fmt.Errorf("upload disk chunk %d: %w", index, err))
+					return
+				}
+				stats.uploaded.Add(1)
+			}(index, key, data)
 		}
 		chunks = append(chunks, DiskChunk{Index: index, Key: key, SizeBytes: size, SHA256: digest})
 	}
-	return WritableDisk{LogicalSizeBytes: info.Size(), ChunkSizeBytes: w.chunkSize, Chunks: chunks}, nil
+	wg.Wait()
+	if firstErr != nil {
+		return WritableDisk{}, nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return WritableDisk{}, nil, err
+	}
+	return WritableDisk{LogicalSizeBytes: info.Size(), ChunkSizeBytes: w.chunkSize, Chunks: chunks}, stats, nil
 }
 
 func (w *Writer) previousChunks(ctx context.Context, sandboxID string) map[int64]DiskChunk {

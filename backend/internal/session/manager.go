@@ -806,9 +806,12 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	time.Sleep(400 * time.Millisecond)
 
 	// Snapshot: pauses the vCPUs and writes VM + RAM state to disk (NOT /dev/shm).
+	snapshotStart := time.Now()
 	if err := m.vmManager.Snapshot(ctx, vmID, snapPath, memPath); err != nil {
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
+	snapshotTime := time.Since(snapshotStart)
+	checkpointStart := time.Now()
 	if m.checkpoints != nil {
 		checkpointRef, err := m.checkpoints.Save(ctx, checkpoint.Input{
 			SandboxID:        sessionID,
@@ -827,6 +830,7 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 		}
 		sess.CheckpointRef = checkpointRef
 	}
+	checkpointTime := time.Since(checkpointStart)
 	m.meterSession(sess, StateActive, time.Now())
 
 	// Detach from the pool so its capacity slot is freed, tear the VM down keeping the
@@ -855,7 +859,8 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	if err := m.notifyState(sess, "paused"); err != nil {
 		return err
 	}
-	slog.Info("session paused", "session_id", sessionID, "ms", time.Since(t0).Milliseconds())
+	slog.Info("session paused", "session_id", sessionID, "ms", time.Since(t0).Milliseconds(),
+		"snapshot_ms", snapshotTime.Milliseconds(), "checkpoint_ms", checkpointTime.Milliseconds())
 	return nil
 }
 
