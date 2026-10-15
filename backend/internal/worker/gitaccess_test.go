@@ -21,7 +21,7 @@ type gitSessionService struct {
 	slot int
 }
 
-func (g gitSessionService) BindGitAccess(id string, bind func(int) error) error {
+func (g gitSessionService) BindSlotGrant(id string, bind func(int) error) error {
 	if g.slot < 0 {
 		return fmt.Errorf("session %s is not active", id)
 	}

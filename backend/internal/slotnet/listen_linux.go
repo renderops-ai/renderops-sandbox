@@ -1,6 +1,12 @@
 //go:build linux
 
-package gitproxy
+// Package slotnet opens worker-side listeners inside a sandbox slot's network
+// namespace (fc-ns-<slot>). A guest reaches them on its gateway address
+// (172.16.0.1); that traffic is delivered locally in the namespace, so it is
+// unaffected by the host egress firewall and by the sandbox's internet switch.
+// Worker proxies that must never hand a credential to the guest (git, model
+// inference) listen this way.
+package slotnet
 
 import (
 	"fmt"
@@ -11,11 +17,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// listenInSlot opens a TCP listener inside fc-ns-<slot>. A socket's network
+// GatewayAddr is the address every slot's TAP holds: the guest's gateway.
+const GatewayAddr = "172.16.0.1"
+
+// Listen opens a TCP listener on address inside fc-ns-<slot>. A socket's network
 // namespace is fixed when it is created, so the listener and every connection
 // it accepts stay in the sandbox namespace, while upstream dials made by the
 // serving goroutines use the worker's own namespace.
-func listenInSlot(slot int, address string) (net.Listener, error) {
+func Listen(slot int, address string) (net.Listener, error) {
 	type result struct {
 		listener net.Listener
 		err      error

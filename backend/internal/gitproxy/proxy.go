@@ -28,11 +28,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"backend/internal/slotnet"
 )
 
 const (
-	// GatewayAddr is the address every slot's TAP holds: the guest's gateway.
-	GatewayAddr = "172.16.0.1"
+	// GatewayAddr is the guest's gateway, where slot listeners live.
+	GatewayAddr = slotnet.GatewayAddr
 	// Port is where the proxy listens inside each granted sandbox's namespace.
 	Port = 7080
 
@@ -135,7 +137,7 @@ func New(cfg Config) (*Proxy, error) {
 		p.transport = transport
 	}
 	if p.listen == nil {
-		p.listen = listenInSlot
+		p.listen = slotnet.Listen
 	}
 	if p.now == nil {
 		p.now = time.Now

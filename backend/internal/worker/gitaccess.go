@@ -17,9 +17,9 @@ type gitAccessProxy interface {
 }
 
 // gitSlotBinder runs a bind against a sandbox's live network slot without
-// racing pause or destroy (see session.Manager.BindGitAccess).
+// racing pause or destroy (see session.Manager.BindSlotGrant).
 type gitSlotBinder interface {
-	BindGitAccess(id string, bind func(slot int) error) error
+	BindSlotGrant(id string, bind func(slot int) error) error
 }
 
 // SetGitProxy enables PUT/DELETE /worker/sandbox/{id}/git-access.
@@ -42,7 +42,7 @@ func (s *Server) grantGitAccess(w http.ResponseWriter, r *http.Request, sandboxI
 	}
 	grant := gitproxy.Grant{Repository: req.Repository, Token: req.Token, ExpiresAt: req.ExpiresAt}
 	var bindErr error
-	err := binder.BindGitAccess(sandboxID, func(slot int) error {
+	err := binder.BindSlotGrant(sandboxID, func(slot int) error {
 		bindErr = s.git.Bind(sandboxID, slot, grant)
 		return bindErr
 	})

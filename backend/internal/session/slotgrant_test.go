@@ -7,7 +7,7 @@ import (
 	"backend/internal/executor/firecracker"
 )
 
-func TestBindGitAccessBindsOnlyTheLiveSlotOfAnActiveSandbox(t *testing.T) {
+func TestBindSlotGrantBindsOnlyTheLiveSlotOfAnActiveSandbox(t *testing.T) {
 	m := &Manager{store: NewStore(10)}
 	active := &Session{ID: "active", State: StateActive, VM: &firecracker.MicroVM{Slot: 5}}
 	paused := &Session{ID: "paused", State: StatePaused}
@@ -19,23 +19,23 @@ func TestBindGitAccessBindsOnlyTheLiveSlotOfAnActiveSandbox(t *testing.T) {
 	}
 
 	var boundSlot = -1
-	if err := m.BindGitAccess("active", func(slot int) error { boundSlot = slot; return nil }); err != nil || boundSlot != 5 {
+	if err := m.BindSlotGrant("active", func(slot int) error { boundSlot = slot; return nil }); err != nil || boundSlot != 5 {
 		t.Fatalf("active: slot=%d err=%v", boundSlot, err)
 	}
 	for _, id := range []string{"paused", "cold", "missing"} {
 		called := false
-		if err := m.BindGitAccess(id, func(int) error { called = true; return nil }); err == nil || called {
+		if err := m.BindSlotGrant(id, func(int) error { called = true; return nil }); err == nil || called {
 			t.Errorf("%s: err=%v called=%v, want refusal without binding", id, err, called)
 		}
 	}
 
 	bindErr := errors.New("listener failed")
-	if err := m.BindGitAccess("active", func(int) error { return bindErr }); !errors.Is(err, bindErr) {
+	if err := m.BindSlotGrant("active", func(int) error { return bindErr }); !errors.Is(err, bindErr) {
 		t.Fatalf("bind error not returned: %v", err)
 	}
 }
 
-func TestBindGitAccessRefusesASessionRemovedWhileWaiting(t *testing.T) {
+func TestBindSlotGrantRefusesASessionRemovedWhileWaiting(t *testing.T) {
 	m := &Manager{store: NewStore(10)}
 	sess := &Session{ID: "sbx", State: StateActive, VM: &firecracker.MicroVM{Slot: 2}}
 	if err := m.store.Add(sess); err != nil {
@@ -45,23 +45,24 @@ func TestBindGitAccessRefusesASessionRemovedWhileWaiting(t *testing.T) {
 	sess.mu.Lock()
 	done := make(chan error, 1)
 	called := false
-	go func() { done <- m.BindGitAccess("sbx", func(int) error { called = true; return nil }) }()
-	m.gitBindMu.Lock()
+	go func() { done <- m.BindSlotGrant("sbx", func(int) error { called = true; return nil }) }()
+	m.slotBindMu.Lock()
 	m.store.Delete("sbx")
-	m.gitBindMu.Unlock()
+	m.slotBindMu.Unlock()
 	sess.mu.Unlock()
 	if err := <-done; err == nil || called {
 		t.Fatalf("bound a removed session: err=%v called=%v", err, called)
 	}
 }
 
-func TestRevokerHook(t *testing.T) {
+func TestEveryRegisteredProxyIsRevoked(t *testing.T) {
 	m := &Manager{}
-	m.revokeGitAccess("sbx") // no revoker configured: no-op
+	m.revokeSlotGrants("sbx") // no revoker configured: no-op
 	var revoked []string
-	m.SetGitAccessRevoker(func(id string) { revoked = append(revoked, id) })
-	m.revokeGitAccess("sbx")
-	if len(revoked) != 1 || revoked[0] != "sbx" {
+	m.AddSlotRevoker(func(id string) { revoked = append(revoked, "git:"+id) })
+	m.AddSlotRevoker(func(id string) { revoked = append(revoked, "model:"+id) })
+	m.revokeSlotGrants("sbx")
+	if len(revoked) != 2 || revoked[0] != "git:sbx" || revoked[1] != "model:sbx" {
 		t.Fatalf("revoked = %v", revoked)
 	}
 }

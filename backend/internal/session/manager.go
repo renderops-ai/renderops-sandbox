@@ -73,9 +73,9 @@ type Manager struct {
 	logMu            sync.RWMutex
 	logStart         func(string, string)
 	logStop          func(string)
-	gitMu            sync.RWMutex
-	gitRevoke        func(string)
-	gitBindMu        sync.Mutex // see BindGitAccess
+	slotGrantMu      sync.RWMutex
+	slotRevokers     []func(string)
+	slotBindMu       sync.Mutex // see BindSlotGrant
 	store            *Store
 	onState          StateHook
 	onMeter          MeterHook
@@ -671,12 +671,12 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string,
 // session there is no live VM, so it just deletes the on-disk snapshot + writable disk.
 func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	m.stopLogs(sessionID)
-	// Remove and revoke together under gitBindMu so a concurrent BindGitAccess
+	// Remove and revoke together under slotBindMu so a concurrent BindSlotGrant
 	// either binds first (and is revoked here) or sees the session gone.
-	m.gitBindMu.Lock()
+	m.slotBindMu.Lock()
 	sess, ok := m.store.Delete(sessionID)
-	m.revokeGitAccess(sessionID)
-	m.gitBindMu.Unlock()
+	m.revokeSlotGrants(sessionID)
+	m.slotBindMu.Unlock()
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
@@ -774,7 +774,7 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	m.stopLogs(sessionID)
 	// The slot is released on pause; a grant must never outlive it. The runner
 	// re-grants after resume if it still needs the repository.
-	m.revokeGitAccess(sessionID)
+	m.revokeSlotGrants(sessionID)
 
 	t0 := time.Now()
 	snapDir := filepath.Join(m.pauseDir, sessionID)

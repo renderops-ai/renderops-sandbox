@@ -409,7 +409,7 @@ func main() {
 	}
 	defer gitProxy.Close()
 	workerServer.SetGitProxy(gitProxy)
-	sessionMgr.SetGitAccessRevoker(gitProxy.Unbind)
+	sessionMgr.AddSlotRevoker(gitProxy.Unbind)
 	// Reuse the host worker process, with an independently configurable endpoint.
 	if endpoint := env("WORKER_LOG_INGEST_URL", ""); endpoint != "" {
 		collector, err := logagent.New(env("WORKER_LOG_SPOOL_DIR", filepath.Join(cfg.RootDirectory, "logs", "pending")), endpoint, token, os.Getenv("WORKER_ID"))
