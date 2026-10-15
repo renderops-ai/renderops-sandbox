@@ -1063,6 +1063,16 @@ func (m *Manager) hydrateCheckpoint(ctx context.Context, sess *Session) error {
 		return fmt.Errorf("local checkpoint artifacts are missing and durable checkpoint reads are disabled")
 	}
 	pauseDir := filepath.Join(m.pauseDir, sess.ID)
+	// Firecracker (FCUid) opens the restored files, so it must be able to enter the
+	// dir; the restore would otherwise create it root-only.
+	if err := os.MkdirAll(pauseDir, 0o755); err != nil {
+		return fmt.Errorf("create pause dir: %w", err)
+	}
+	if m.vmManager.FCUid > 0 {
+		if err := os.Chown(pauseDir, m.vmManager.FCUid, m.vmManager.FCGid); err != nil {
+			return fmt.Errorf("set Firecracker ownership on %s: %w", pauseDir, err)
+		}
+	}
 	paths := checkpoint.RestorePaths{
 		Snapshot:     filepath.Join(pauseDir, "snap"),
 		Memory:       filepath.Join(pauseDir, "mem"),
