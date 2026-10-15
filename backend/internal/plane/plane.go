@@ -15,7 +15,7 @@ const (
 	RouteHealth        = "/worker/health"
 	RouteCapacity      = "/worker/capacity"
 	RouteSandbox       = "/worker/sandbox"  // POST — create
-	RouteSandboxPrefix = "/worker/sandbox/" // {id}[/run|exec|pause|resume]; DELETE /{id}
+	RouteSandboxPrefix = "/worker/sandbox/" // {id}[/run|exec|pause|resume]; PUT|DELETE /{id}/git-access; DELETE /{id}
 	RouteSandboxIDE    = "/worker/sandbox/{sandboxID}/ide"
 )
 

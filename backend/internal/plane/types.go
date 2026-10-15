@@ -56,6 +56,22 @@ type CreateResponse struct {
 	DiskGB    int    `json:"disk_gb"`
 }
 
+// GitAccessRequest grants a sandbox read-only fetch access to one GitHub
+// repository through the worker's git proxy. Token is a short-lived
+// installation token narrowed to that repository with contents:read; the
+// worker keeps it in memory only and never forwards it to the guest.
+type GitAccessRequest struct {
+	Repository string    `json:"repository"` // owner/name of the base repository
+	Token      string    `json:"token"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+// GitAccessResponse is the credential-free remote the guest fetches from.
+type GitAccessResponse struct {
+	RemoteURL string    `json:"remote_url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // RunRequest runs code in a sandbox.
 type RunRequest struct {
 	Code     string `json:"code"`

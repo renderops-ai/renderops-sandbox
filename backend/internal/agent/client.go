@@ -72,6 +72,19 @@ func (c *Client) StartIDE(ctx context.Context, id string) (plane.IDEInstance, er
 	return out, err
 }
 
+// GrantGitAccess gives the sandbox read-only fetch access to one repository
+// through the worker's git proxy. The token stays on the worker.
+func (c *Client) GrantGitAccess(ctx context.Context, id string, req plane.GitAccessRequest) (plane.GitAccessResponse, error) {
+	var out plane.GitAccessResponse
+	err := c.do(ctx, http.MethodPut, plane.RouteSandboxPrefix+id+"/git-access", req, &out)
+	return out, err
+}
+
+// RevokeGitAccess drops the sandbox's git grant. It is idempotent.
+func (c *Client) RevokeGitAccess(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, plane.RouteSandboxPrefix+id+"/git-access", nil, nil)
+}
+
 // Health reports whether the agent answers (used to wait for the tunnel).
 func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, plane.RouteHealth, nil, nil)

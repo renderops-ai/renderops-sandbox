@@ -7,6 +7,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/checkpoint"
 	"backend/internal/executor/firecracker"
+	"backend/internal/gitproxy"
 	"backend/internal/ide"
 	"backend/internal/logagent"
 	"backend/internal/logstream"
@@ -399,6 +400,16 @@ func main() {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
 	workerServer := worker.NewServerWithAdmission(sessionMgr, token, admission)
+	// Read-only git access for agent sessions: the proxy keeps short-lived,
+	// repository-scoped tokens in memory and serves each guest on its gateway.
+	gitProxy, err := gitproxy.New(gitproxy.Config{Upstream: env("GIT_PROXY_UPSTREAM", "https://github.com")})
+	if err != nil {
+		slog.Error("configure git proxy", "err", err)
+		os.Exit(1)
+	}
+	defer gitProxy.Close()
+	workerServer.SetGitProxy(gitProxy)
+	sessionMgr.SetGitAccessRevoker(gitProxy.Unbind)
 	// Reuse the host worker process, with an independently configurable endpoint.
 	if endpoint := env("WORKER_LOG_INGEST_URL", ""); endpoint != "" {
 		collector, err := logagent.New(env("WORKER_LOG_SPOOL_DIR", filepath.Join(cfg.RootDirectory, "logs", "pending")), endpoint, token, os.Getenv("WORKER_ID"))
