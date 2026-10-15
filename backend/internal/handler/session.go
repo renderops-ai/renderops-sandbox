@@ -47,6 +47,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 
 		// POST /session — create new session
 		case r.Method == http.MethodPost && path == "":
+			createStartedAt := time.Now()
 			if tc.MaxSessions == 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
@@ -135,6 +136,11 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				return
 			}
 
+			// Capture monotonic elapsed time at VM-running acknowledgement, not
+			// after metadata writes or asynchronous audit delivery. This is a
+			// successful create latency, not application readiness or resume.
+			startupDurationMs := time.Since(createStartedAt).Milliseconds()
+
 			// The control plane already owns the durable lifecycle row. Enrich
 			// dashboard fields without allowing this write to overwrite state.
 			name := createReq.Name
@@ -160,6 +166,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				map[string]any{
 					"name": name, "vcpus": size.VCPUs, "memory_mb": size.MemoryMB,
 					"disk_gb": size.DiskGB, "image": image, "billing_model": auth.Billing.Model,
+					"startup_duration_ms": startupDurationMs,
 				},
 			)
 

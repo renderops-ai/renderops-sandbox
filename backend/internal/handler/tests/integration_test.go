@@ -332,6 +332,12 @@ func TestSKPlatformContract(t *testing.T) {
 				t.Fatalf("unexpected audit action %q", event.Action)
 			}
 			wantActions[event.Action] = true
+			if event.Action == "sandbox.created" {
+				duration, ok := event.Metadata["startup_duration_ms"].(int64)
+				if !ok || duration < 0 {
+					t.Fatalf("create audit missing non-negative measured startup duration: %+v", event.Metadata)
+				}
+			}
 			if event.ScopeType != "personal" || event.ScopeID != "dash-user" {
 				t.Fatalf("unexpected audit scope: %+v", event)
 			}
