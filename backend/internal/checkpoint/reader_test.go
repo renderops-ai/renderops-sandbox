@@ -250,3 +250,43 @@ func assertFilesEqual(t *testing.T, left, right string) {
 		t.Fatalf("restored file %s does not match %s", right, left)
 	}
 }
+
+func TestWriterReaderRoundTripRestoresEmptyMemoryChunks(t *testing.T) {
+	ctx := context.Background()
+	store, err := template.NewLocalStore(filepath.Join(t.TempDir(), "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := NewWriter(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := t.TempDir()
+	// Guest memory: data, an all-zero chunk the writer leaves out, then data again.
+	memoryPath := filepath.Join(sourceDir, "mem")
+	memory := append(append(bytes.Repeat([]byte{7}, defaultChunkSize), make([]byte, defaultChunkSize)...), []byte("tail")...)
+	if err := os.WriteFile(memoryPath, memory, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sandboxID := uuid.NewString()
+	if _, err := writer.Save(ctx, Input{
+		SandboxID: sandboxID, SnapshotPath: writeTestFile(t, sourceDir, "snap", "vm-state"),
+		MemoryPath: memoryPath, WritableDiskPath: writeTestFile(t, sourceDir, "disk", "disk"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationDir := t.TempDir()
+	dst := RestorePaths{
+		Snapshot:     filepath.Join(destinationDir, "snap"),
+		Memory:       filepath.Join(destinationDir, "mem"),
+		WritableDisk: filepath.Join(destinationDir, "disk"),
+	}
+	if _, err := reader.Restore(ctx, sandboxID, "", dst); err != nil {
+		t.Fatal(err)
+	}
+	assertFilesEqual(t, memoryPath, dst.Memory)
+}

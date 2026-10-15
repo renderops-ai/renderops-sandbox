@@ -54,6 +54,7 @@ type Session struct {
 	VsockPathAtPause  string // vsock UDS path baked into the session snapshot
 	TapNameAtPause    string // host TAP name baked into the session snapshot
 	CheckpointRef     string // durable checkpoint manifest key; local paths remain the phase-1 resume source
+	BootIDAtPause     string // host boot the local pause files were written in (see readManifest)
 }
 
 type Store struct {

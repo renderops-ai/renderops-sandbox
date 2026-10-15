@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	manifestVersion  = 2
+	manifestVersion  = 3 // 3: memory in chunks (MemoryChunks); 2: one memory object
 	defaultChunkSize = 4 * 1024 * 1024
 )
 
@@ -84,8 +84,11 @@ type Manifest struct {
 	Resources    Resources      `json:"resources"`
 	Resume       ResumeMetadata `json:"resume"`
 	Snapshot     Artifact       `json:"snapshot"`
-	Memory       Artifact       `json:"memory"`
+	Memory       Artifact       `json:"memory"` // version 2: the whole memory file
 	WritableDisk WritableDisk   `json:"writable_disk"`
+	// Version 3: guest memory in chunks, same layout as the writable disk. Empty
+	// chunks are left out and unchanged ones reuse the previous generation's objects.
+	MemoryChunks *WritableDisk `json:"memory_chunks,omitempty"`
 }
 
 type activePointer struct {
@@ -182,8 +185,8 @@ func (w *Writer) DeleteSandbox(ctx context.Context, sandboxID string) (int, erro
 	return deleted, errors.Join(errs...)
 }
 
-// Save uploads VM state, memory, and only new writable-disk chunks, then commits
-// the manifest and active pointer last. Partial generations are never selected.
+// Save uploads VM state and only the new memory and writable-disk chunks, then
+// commits the manifest and active pointer last. Partial generations are never selected.
 func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	if _, err := uuid.Parse(in.SandboxID); err != nil {
 		return "", fmt.Errorf("invalid sandbox id %q: %w", in.SandboxID, err)
@@ -201,14 +204,15 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("upload VM state: %w", err)
 	}
+	previous := w.previousChunks(ctx, in.SandboxID)
 	memoryStart := time.Now()
-	memory, err := w.putFile(ctx, path.Join(base, "memory.mem"), in.MemoryPath)
+	memory, memoryStats, err := w.putChunks(ctx, in.MemoryPath, path.Join(w.prefix, in.SandboxID, "memory-chunks"), previous.memory)
 	if err != nil {
 		return "", fmt.Errorf("upload memory: %w", err)
 	}
 	memoryTime := time.Since(memoryStart)
 	diskStart := time.Now()
-	writable, stats, err := w.putDisk(ctx, in.SandboxID, in.WritableDiskPath)
+	writable, diskStats, err := w.putChunks(ctx, in.WritableDiskPath, path.Join(w.prefix, in.SandboxID, "disk-chunks"), previous.disk)
 	if err != nil {
 		return "", fmt.Errorf("upload writable disk: %w", err)
 	}
@@ -222,8 +226,8 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 		Resources:    Resources{VCPUs: in.VCPUs, MemoryMB: in.MemoryMB, DiskGB: in.DiskGB},
 		Resume:       ResumeMetadata{RootfsPath: in.RootfsPath, VsockPath: in.VsockPath, TapName: in.TapName},
 		Snapshot:     snapshot,
-		Memory:       memory,
 		WritableDisk: writable,
+		MemoryChunks: &memory,
 	}
 	manifestKey := path.Join(base, "manifest.json")
 	if err := w.putJSON(ctx, manifestKey, manifest); err != nil {
@@ -240,24 +244,27 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 		return "", fmt.Errorf("activate checkpoint: %w", err)
 	}
 	slog.Info("checkpoint saved", "sandbox_id", in.SandboxID, "generation", generation,
-		"memory_bytes", memory.SizeBytes, "memory_ms", memoryTime.Milliseconds(),
-		"disk_chunks", len(writable.Chunks), "disk_chunks_uploaded", stats.uploaded.Load(),
-		"disk_chunks_reused", stats.reused.Load(), "disk_ms", diskTime.Milliseconds(),
+		"memory_chunks", len(memory.Chunks), "memory_chunks_uploaded", memoryStats.uploaded.Load(),
+		"memory_chunks_reused", memoryStats.reused.Load(), "memory_ms", memoryTime.Milliseconds(),
+		"disk_chunks", len(writable.Chunks), "disk_chunks_uploaded", diskStats.uploaded.Load(),
+		"disk_chunks_reused", diskStats.reused.Load(), "disk_ms", diskTime.Milliseconds(),
 		"ms", time.Since(start).Milliseconds())
 	return manifestKey, nil
 }
 
-// diskUploadConcurrency bounds parallel chunk uploads. Each in-flight chunk holds
+// chunkUploadConcurrency bounds parallel chunk uploads. Each in-flight chunk holds
 // one chunk of data in memory.
-const diskUploadConcurrency = 8
+const chunkUploadConcurrency = 8
 
-type diskStats struct {
+type chunkStats struct {
 	uploaded atomic.Int64 // new chunks sent to the store
 	reused   atomic.Int64 // chunks already in the store
 }
 
-func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (WritableDisk, *diskStats, error) {
-	stats := &diskStats{}
+// putChunks uploads filePath as chunks under chunkDir: all-zero chunks are left out,
+// and a chunk matching the previous generation's at the same index reuses its object.
+func (w *Writer) putChunks(ctx context.Context, filePath, chunkDir string, previous map[int64]DiskChunk) (WritableDisk, *chunkStats, error) {
+	stats := &chunkStats{}
 	f, err := os.Open(filePath)
 	if err != nil {
 		return WritableDisk{}, nil, fmt.Errorf("open %s: %w", filePath, err)
@@ -268,14 +275,13 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 		return WritableDisk{}, nil, fmt.Errorf("stat %s: %w", filePath, err)
 	}
 	if info.Size() <= 0 {
-		return WritableDisk{}, nil, fmt.Errorf("writable disk %s is empty", filePath)
+		return WritableDisk{}, nil, fmt.Errorf("%s is empty", filePath)
 	}
 
 	indices, err := allocatedChunkIndices(f, info.Size(), w.chunkSize)
 	if err != nil {
-		return WritableDisk{}, nil, fmt.Errorf("scan sparse writable disk: %w", err)
+		return WritableDisk{}, nil, fmt.Errorf("scan sparse file: %w", err)
 	}
-	previous := w.previousChunks(ctx, sandboxID)
 
 	// Chunks are read and hashed in order; new ones upload in the background. The
 	// first upload error cancels the rest.
@@ -283,7 +289,7 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 	defer cancel()
 	var (
 		wg       sync.WaitGroup
-		slots    = make(chan struct{}, diskUploadConcurrency)
+		slots    = make(chan struct{}, chunkUploadConcurrency)
 		failOnce sync.Once
 		firstErr error
 	)
@@ -302,7 +308,7 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 		size := min(w.chunkSize, info.Size()-offset)
 		data := make([]byte, size)
 		if _, err := f.ReadAt(data, offset); err != nil && !errors.Is(err, io.EOF) {
-			fail(fmt.Errorf("read disk chunk %d: %w", index, err))
+			fail(fmt.Errorf("read chunk %d: %w", index, err))
 			break
 		}
 		if isZero(data) {
@@ -310,7 +316,7 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 		}
 		hash := sha256.Sum256(data)
 		digest := hex.EncodeToString(hash[:])
-		key := path.Join(w.prefix, sandboxID, "disk-chunks", digest)
+		key := path.Join(chunkDir, digest)
 		if old, ok := previous[index]; ok && old.SHA256 == digest {
 			key = old.Key
 			stats.reused.Add(1)
@@ -322,7 +328,7 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 				defer func() { <-slots }()
 				_, exists, err := w.store.Stat(uploadCtx, key)
 				if err != nil {
-					fail(fmt.Errorf("stat disk chunk %d: %w", index, err))
+					fail(fmt.Errorf("stat chunk %d: %w", index, err))
 					return
 				}
 				if exists {
@@ -330,7 +336,7 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 					return
 				}
 				if err := w.store.Put(uploadCtx, key, bytes.NewReader(data)); err != nil {
-					fail(fmt.Errorf("upload disk chunk %d: %w", index, err))
+					fail(fmt.Errorf("upload chunk %d: %w", index, err))
 					return
 				}
 				stats.uploaded.Add(1)
@@ -348,8 +354,13 @@ func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (Writa
 	return WritableDisk{LogicalSizeBytes: info.Size(), ChunkSizeBytes: w.chunkSize, Chunks: chunks}, stats, nil
 }
 
-func (w *Writer) previousChunks(ctx context.Context, sandboxID string) map[int64]DiskChunk {
-	result := make(map[int64]DiskChunk)
+// previousGeneration is the latest generation's chunks by index, for reuse.
+type previousGeneration struct {
+	disk, memory map[int64]DiskChunk
+}
+
+func (w *Writer) previousChunks(ctx context.Context, sandboxID string) previousGeneration {
+	result := previousGeneration{disk: make(map[int64]DiskChunk), memory: make(map[int64]DiskChunk)}
 	pointerReader, err := w.store.Get(ctx, path.Join(w.prefix, sandboxID, "latest.json"))
 	if err != nil {
 		return result
@@ -369,7 +380,12 @@ func (w *Writer) previousChunks(ctx context.Context, sandboxID string) map[int64
 		return result
 	}
 	for _, chunk := range manifest.WritableDisk.Chunks {
-		result[chunk.Index] = chunk
+		result.disk[chunk.Index] = chunk
+	}
+	if manifest.MemoryChunks != nil {
+		for _, chunk := range manifest.MemoryChunks.Chunks {
+			result.memory[chunk.Index] = chunk
+		}
 	}
 	return result
 }
@@ -410,11 +426,17 @@ func allocatedChunkIndices(f *os.File, logicalSize, chunkSize int64) ([]int64, e
 	return result, nil
 }
 
+// zeroChunk lets isZero compare with bytes.Equal, which is much faster than a byte loop
+// over the hundreds of MiB a memory file has.
+var zeroChunk = make([]byte, defaultChunkSize)
+
 func isZero(data []byte) bool {
-	for _, value := range data {
-		if value != 0 {
+	for len(data) > 0 {
+		n := min(len(data), len(zeroChunk))
+		if !bytes.Equal(data[:n], zeroChunk[:n]) {
 			return false
 		}
+		data = data[n:]
 	}
 	return true
 }

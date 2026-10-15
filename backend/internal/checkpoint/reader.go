@@ -102,16 +102,16 @@ func (r *Reader) Restore(ctx context.Context, sandboxID, manifestKey string, dst
 			return RestoreResult{}, fmt.Errorf("decode legacy checkpoint manifest: %w", err)
 		}
 		result.Resources, result.Resume = manifest.Resources, manifest.Resume
-		if err := r.restoreArtifacts(ctx, sandboxID, dst, manifest.Snapshot, manifest.Memory, &manifest.WritableDisk, nil); err != nil {
+		if err := r.restoreArtifacts(ctx, sandboxID, dst, manifest.Snapshot, manifest.Memory, nil, &manifest.WritableDisk, nil); err != nil {
 			return RestoreResult{}, err
 		}
-	case manifestVersion:
+	case 2, manifestVersion:
 		var manifest Manifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return RestoreResult{}, fmt.Errorf("decode checkpoint manifest: %w", err)
 		}
 		result.Resources, result.Resume = manifest.Resources, manifest.Resume
-		if err := r.restoreArtifacts(ctx, sandboxID, dst, manifest.Snapshot, manifest.Memory, nil, &manifest.WritableDisk); err != nil {
+		if err := r.restoreArtifacts(ctx, sandboxID, dst, manifest.Snapshot, manifest.Memory, manifest.MemoryChunks, nil, &manifest.WritableDisk); err != nil {
 			return RestoreResult{}, err
 		}
 	default:
@@ -135,7 +135,9 @@ func (r *Reader) activeManifestKey(ctx context.Context, sandboxID string) (strin
 	return pointer.ManifestKey, nil
 }
 
-func (r *Reader) restoreArtifacts(ctx context.Context, sandboxID string, dst RestorePaths, snapshot, memory Artifact, legacyDisk *Artifact, disk *WritableDisk) error {
+// restoreArtifacts restores memory from memoryChunks when set, else from the single
+// memory object (version 1 and 2 checkpoints).
+func (r *Reader) restoreArtifacts(ctx context.Context, sandboxID string, dst RestorePaths, snapshot, memory Artifact, memoryChunks *WritableDisk, legacyDisk *Artifact, disk *WritableDisk) error {
 	temps := make([]string, 0, 3)
 	cleanup := func() {
 		for _, name := range temps {
@@ -149,7 +151,12 @@ func (r *Reader) restoreArtifacts(ctx context.Context, sandboxID string, dst Res
 		return fmt.Errorf("restore VM state: %w", err)
 	}
 	temps = append(temps, snapTemp)
-	memTemp, err := r.downloadArtifact(ctx, sandboxID, memory, dst.Memory)
+	var memTemp string
+	if memoryChunks != nil {
+		memTemp, err = r.reconstructDisk(ctx, sandboxID, *memoryChunks, dst.Memory)
+	} else {
+		memTemp, err = r.downloadArtifact(ctx, sandboxID, memory, dst.Memory)
+	}
 	if err != nil {
 		return fmt.Errorf("restore memory: %w", err)
 	}

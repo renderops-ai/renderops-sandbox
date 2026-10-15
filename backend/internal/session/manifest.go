@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,7 @@ type pausedRecord struct {
 	VsockPathAtPause  string            `json:"vsock_path_at_pause"`
 	TapNameAtPause    string            `json:"tap_name_at_pause"`
 	CheckpointRef     string            `json:"checkpoint_ref,omitempty"`
+	BootID            string            `json:"boot_id,omitempty"`
 }
 
 func recordFromSession(s *Session) pausedRecord {
@@ -62,6 +64,7 @@ func recordFromSession(s *Session) pausedRecord {
 		VsockPathAtPause:  s.VsockPathAtPause,
 		TapNameAtPause:    s.TapNameAtPause,
 		CheckpointRef:     s.CheckpointRef,
+		BootID:            s.BootIDAtPause,
 	}
 }
 
@@ -100,6 +103,7 @@ func (r pausedRecord) toSession() *Session {
 		VsockPathAtPause:  r.VsockPathAtPause,
 		TapNameAtPause:    r.TapNameAtPause,
 		CheckpointRef:     r.CheckpointRef,
+		BootIDAtPause:     r.BootID,
 	}
 }
 
@@ -141,13 +145,28 @@ func readManifest(path string) ([]*Session, error) {
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
 	sessions := make([]*Session, 0, len(records))
+	currentBoot := bootID()
 	for _, r := range records {
+		// Pause memory files are not fsynced (the Blob checkpoint is the durable copy),
+		// so after a host reboot they may be incomplete: restore from Blob instead.
+		if r.BootID != "" && currentBoot != "" && r.BootID != currentBoot && r.CheckpointRef != "" {
+			r.SnapPath, r.MemPath = "", ""
+		}
 		if (!fileExists(r.SnapPath) || !fileExists(r.MemPath) || !fileExists(r.WritableDiskPath)) && r.CheckpointRef == "" {
 			continue
 		}
 		sessions = append(sessions, r.toSession())
 	}
 	return sessions, nil
+}
+
+// bootID identifies the current host boot, or is empty if unknown.
+func bootID() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func fileExists(path string) bool {

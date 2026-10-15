@@ -76,6 +76,13 @@ type MicroVM struct {
 	// from the current template's after a template rebuild. Empty for cold boots.
 	SnapshotVsockPath string
 	SnapshotTapName   string
+
+	// Guest memory file this VM was restored from, or its last pause snapshot. Restored
+	// VMs track dirty pages, so SnapshotMemory writes only what changed since then. Empty
+	// when unknown (cold boot, failed snapshot): the next snapshot is a full one.
+	MemBasePath   string
+	memBaseShared bool // MemBasePath is a template's, shared by many VMs
+	trackDirty    bool // restored with Firecracker dirty-page tracking on
 }
 
 type NetworkInterface struct {
@@ -182,6 +189,7 @@ type FireCrackerManager struct {
 	FCUid         int
 	FCGid         int
 	writableDisks writabledisk.Store
+	memoryBases   memoryBaseCache // reflinkable copies of template memory, see memdiff.go
 }
 
 type VMManager interface {
@@ -854,7 +862,7 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	if err := f.putJSON(client, "http://localhost/snapshot/load", SnapshotLoadRequest{
 		SnapshotPath:        tmpl.SnapPath,
 		MemFilePath:         tmpl.MemPath,
-		EnableDiffSnapshots: false,
+		EnableDiffSnapshots: true, // pause snapshots write only changed memory (memdiff.go)
 		ResumeVM:            false,
 	}); err != nil {
 		restoreCleanup()
@@ -936,6 +944,7 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	// default config, and pause saves Config.RootfsPath for the next resume, so a
 	// sandbox on another image would come back on the default rootfs.
 	vm.Config.RootfsPath = tmpl.RootfsPath
+	vm.MemBasePath, vm.memBaseShared, vm.trackDirty = tmpl.MemPath, cloneDisk, true
 
 	f.mu.Lock()
 	f.Vms[vmID] = vm

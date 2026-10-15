@@ -53,7 +53,7 @@ func TestWriterCommitsPointerLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantHash := sha256.Sum256([]byte("user-data"))
-	if manifest.Version != 2 || manifest.WritableDisk.LogicalSizeBytes != int64(len("user-data")) || len(manifest.WritableDisk.Chunks) != 1 || manifest.WritableDisk.Chunks[0].SHA256 != hex.EncodeToString(wantHash[:]) {
+	if manifest.Version != manifestVersion || manifest.WritableDisk.LogicalSizeBytes != int64(len("user-data")) || len(manifest.WritableDisk.Chunks) != 1 || manifest.WritableDisk.Chunks[0].SHA256 != hex.EncodeToString(wantHash[:]) {
 		t.Fatalf("unexpected writable artifact: %+v", manifest.WritableDisk)
 	}
 }
@@ -232,4 +232,44 @@ func (s *recordingStore) chunkWrites() int {
 		}
 	}
 	return count
+}
+
+func TestWriterStoresMemoryAsChangedNonEmptyChunks(t *testing.T) {
+	store := newRecordingStore()
+	writer, err := NewWriter(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.chunkSize = 4
+	dir := t.TempDir()
+	memory := writeTestFile(t, dir, "mem", "abcd\x00\x00\x00\x00efgh")
+	input := Input{SandboxID: "a6846a48-db37-46bc-907a-3a9e15093603", SnapshotPath: writeTestFile(t, dir, "snap", "snap"), MemoryPath: memory, WritableDiskPath: writeTestFile(t, dir, "disk", "disk")}
+	manifestKey, err := writer.Save(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(store.objects[manifestKey], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.MemoryChunks == nil || len(manifest.MemoryChunks.Chunks) != 2 || manifest.MemoryChunks.Chunks[0].Index != 0 || manifest.MemoryChunks.Chunks[1].Index != 2 {
+		t.Fatalf("memory chunks = %+v, want indices 0 and 2 (the empty chunk left out)", manifest.MemoryChunks)
+	}
+
+	if err := os.WriteFile(memory, []byte("abcd\x00\x00\x00\x00WXYZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.order = nil
+	if _, err := writer.Save(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	uploaded := 0
+	for _, key := range store.order {
+		if strings.Contains(key, "/memory-chunks/") {
+			uploaded++
+		}
+	}
+	if uploaded != 1 {
+		t.Fatalf("changed memory uploaded %d chunks, want 1", uploaded)
+	}
 }

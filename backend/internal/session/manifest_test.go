@@ -43,3 +43,41 @@ func TestReadManifestRetainsDurableCheckpointWhenLocalFilesAreMissing(t *testing
 		t.Fatalf("durable paused session was dropped: %#v", sessions)
 	}
 }
+
+func TestReadManifestRestoresFromBlobAfterHostReboot(t *testing.T) {
+	if bootID() == "" {
+		t.Skip("no boot id on this platform")
+	}
+	dir := t.TempDir()
+	snap, mem := filepath.Join(dir, "snap"), filepath.Join(dir, "mem")
+	for _, name := range []string{snap, mem} {
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestPath := filepath.Join(dir, "paused-sessions.json")
+	records := []pausedRecord{
+		{ID: "rebooted", CheckpointRef: "ref", SnapPath: snap, MemPath: mem, BootID: "an-earlier-boot"},
+		{ID: "same-boot", CheckpointRef: "ref", SnapPath: snap, MemPath: mem, BootID: bootID()},
+	}
+	data, err := json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2", len(sessions))
+	}
+	if sessions[0].SnapPath != "" || sessions[0].MemPath != "" {
+		t.Fatalf("pause files from an earlier boot were kept: %q %q", sessions[0].SnapPath, sessions[0].MemPath)
+	}
+	if sessions[1].SnapPath != snap || sessions[1].MemPath != mem {
+		t.Fatalf("pause files from this boot were dropped: %q %q", sessions[1].SnapPath, sessions[1].MemPath)
+	}
+}

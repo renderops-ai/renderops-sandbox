@@ -84,6 +84,7 @@ type Manager struct {
 	sizePools        map[string]*firecracker.VMPool           // keyed by vmsize.Key — one pool per resource shape
 	sizeTemplates    map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
 	pauseDir         string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
+	legacyPauseDir   string                                   // pause dir before it moved next to the writable disks
 	manifestPath     string                                   // recovery manifest of paused sessions
 	manifestMu       sync.Mutex                               // serializes concurrent pause manifest rewrites
 	createLocksMu    sync.Mutex
@@ -124,12 +125,15 @@ func NewManager(
 		maxLifetime:   maxLifetime,
 		sizePools:     sizePools,
 		sizeTemplates: sizeTemplates,
-		pauseDir:      filepath.Join(vmManager.SocketDir, "pause"),
-		manifestPath:  filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
-		createLocks:   make(map[string]*createLock),
-		meterLast:     make(map[string]time.Time),
-		meterTotals:   make(map[string]MeterSample),
-		maxTerminals:  8,
+		// Next to the writable disks: each pause's memory file starts as a reflink of the
+		// previous one, which needs that reflink-capable filesystem.
+		pauseDir:       filepath.Join(vmManager.WritableDiskRoot(), "pause"),
+		legacyPauseDir: filepath.Join(vmManager.SocketDir, "pause"),
+		manifestPath:   filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
+		createLocks:    make(map[string]*createLock),
+		meterLast:      make(map[string]time.Time),
+		meterTotals:    make(map[string]MeterSample),
+		maxTerminals:   8,
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -321,12 +325,16 @@ func (m *Manager) cleanupOrphanedDisks() {
 
 	// 2. Stale pause snapshot dirs (pause/<session-id>) with no matching paused session.
 	removedPauses := 0
-	if entries, err := os.ReadDir(m.pauseDir); err == nil {
+	for _, dir := range []string{m.pauseDir, m.legacyPauseDir} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
 		for _, e := range entries {
 			if !e.IsDir() || keepPause[e.Name()] {
 				continue
 			}
-			if err := os.RemoveAll(filepath.Join(m.pauseDir, e.Name())); err == nil {
+			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err == nil {
 				removedPauses++
 			}
 		}
@@ -702,7 +710,9 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 			}
 		}
 	}
-	// A sandbox paused and resumed earlier still has checkpoints in Blob.
+	// A sandbox paused and resumed earlier still has its memory file locally and
+	// checkpoints in Blob.
+	m.removePauseDirs(sessionID)
 	m.purgeCheckpoints(sessionID)
 
 	if err := m.notifyState(sess, "destroyed"); err != nil {
@@ -770,7 +780,9 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 		os.Chown(snapDir, m.vmManager.FCUid, m.vmManager.FCGid)
 	}
 	snapPath := filepath.Join(snapDir, "snap")
-	memPath := filepath.Join(snapDir, "mem")
+	// A new name each pause: the previous memory file still backs the running VM and is
+	// the base this one is built from.
+	memPath := filepath.Join(snapDir, "mem-"+uuid.NewString())
 
 	// Capture resume info before tearing the VM down. The session snapshot bakes the
 	// device paths the VM was restored with (Firecracker carries the vsock UDS path + TAP
@@ -805,12 +817,20 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	}
 	time.Sleep(400 * time.Millisecond)
 
-	// Snapshot: pauses the vCPUs and writes VM + RAM state to disk (NOT /dev/shm).
+	// Snapshot: pauses the vCPUs and writes VM state + the full RAM file to disk (NOT
+	// /dev/shm), writing only the memory that changed since the VM's base memory file.
+	previousMem := sess.VM.MemBasePath
 	snapshotStart := time.Now()
-	if err := m.vmManager.Snapshot(ctx, vmID, snapPath, memPath); err != nil {
+	if err := m.vmManager.SnapshotMemory(ctx, vmID, snapPath, memPath); err != nil {
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
 	snapshotTime := time.Since(snapshotStart)
+	// memPath now holds all of the VM's memory; the previous pause's file is not needed.
+	if previousMem != "" && previousMem != memPath && ownedBySession(previousMem, sessionID) {
+		if err := os.Remove(previousMem); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("remove previous pause memory", "session_id", sessionID, "path", previousMem, "err", err)
+		}
+	}
 	checkpointStart := time.Now()
 	if m.checkpoints != nil {
 		checkpointRef, err := m.checkpoints.Save(ctx, checkpoint.Input{
@@ -847,6 +867,7 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 
 	sess.SnapPath = snapPath
 	sess.MemPath = memPath
+	sess.BootIDAtPause = bootID()
 	sess.State = StatePaused
 	sess.PausedAt = time.Now()
 	sess.VM = nil
@@ -881,8 +902,9 @@ func (m *Manager) rollbackFailedCheckpoint(ctx context.Context, sess *Session, v
 		}
 	}
 	sess.VsockConn = conn
+	// memPath stays: the snapshot reset Firecracker's dirty tracking, so it is the
+	// running VM's base for its next pause.
 	os.Remove(snapPath)
-	os.Remove(memPath)
 	return fmt.Errorf("durable checkpoint failed; sandbox resumed: %w", uploadErr)
 }
 
@@ -1017,9 +1039,9 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.LastUsed = time.Now()
 	m.startLogs(sess.ID, vm.VsockPath)
 
-	// The mem/snap files are consumed by the restore; the disk persists. Clean them up.
+	// The snap file is consumed by the restore. The mem file stays: it backs the VM's
+	// memory and is the base its next pause builds on (deleted then, or on destroy).
 	os.Remove(sess.SnapPath)
-	os.Remove(sess.MemPath)
 	sess.SnapPath = ""
 	sess.MemPath = ""
 
@@ -1126,7 +1148,25 @@ func (m *Manager) cleanupPausedFiles(sess *Session) {
 			slog.Warn("failed to delete paused writable disk", "session_id", sess.ID, "path", sess.WritableDiskPath, "err", err)
 		}
 	}
-	os.RemoveAll(filepath.Join(m.pauseDir, sess.ID))
+	m.removePauseDirs(sess.ID)
+}
+
+// removePauseDirs deletes a session's pause snapshot dir in both pause locations.
+func (m *Manager) removePauseDirs(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	for _, dir := range []string{m.pauseDir, m.legacyPauseDir} {
+		if err := os.RemoveAll(filepath.Join(dir, sessionID)); err != nil {
+			slog.Warn("remove pause dir", "session_id", sessionID, "dir", dir, "err", err)
+		}
+	}
+}
+
+// ownedBySession reports whether path is in the session's pause dir (pause/<id>/),
+// as opposed to a template's memory file shared by many VMs.
+func ownedBySession(path, sessionID string) bool {
+	return sessionID != "" && filepath.Base(filepath.Dir(path)) == sessionID
 }
 
 // PauseAllActive snapshots active sessions with bounded concurrency. It returns
