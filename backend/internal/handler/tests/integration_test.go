@@ -197,6 +197,51 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+// TestSessionExecResolvesTimeout checks that /exec applies the policy default
+// and max (60s / 5m in testExecutionPolicy) like /run, so the worker call's
+// timeout is bounded by the advertised limit.
+func TestSessionExecResolvesTimeout(t *testing.T) {
+	svc := newFakeSessionService()
+	server := newTestServer(t, testDeps{sessionSvc: svc})
+
+	createReq := httptest.NewRequest(http.MethodPost, "/session", nil)
+	createReq.Header.Set("Authorization", "Bearer ro_live_pro-key")
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var createResp handler.CreateSessionResponse
+	if err := json.NewDecoder(createRec.Body).Decode(&createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	sessionID := createResp.Session.SessionID
+
+	bodies := []string{
+		`{"command":"true"}`,                  // unset: policy default
+		`{"command":"sleep 90","timeout":90}`, // within the max: as requested
+		`{"command":"true","timeout":3600}`,   // above the max: capped
+	}
+	for _, body := range bodies {
+		req := httptest.NewRequest(http.MethodPost, "/session/"+sessionID+"/exec", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer ro_live_pro-key")
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("exec %s: expected 200, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	svc.mu.Lock()
+	got := append([]int(nil), svc.execTimeouts...)
+	svc.mu.Unlock()
+	want := []int{60, 90, 300}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("exec timeouts = %v, want %v", got, want)
+	}
+}
+
 // TestSKPlatformContract replays, verbatim, every call sk-renderops-platform
 // makes to the Go backend (src/lib/server/actions/sandboxes.js): create,
 // pause, resume, destroy — authenticated the way sk authenticates (a
@@ -481,9 +526,10 @@ func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error
 }
 
 type fakeSessionService struct {
-	mu        sync.Mutex
-	sessions  map[string]*plane.SessionInfo
-	createErr error
+	mu           sync.Mutex
+	sessions     map[string]*plane.SessionInfo
+	createErr    error
+	execTimeouts []int // timeoutSec of each Exec call
 }
 
 func newFakeSessionService() *fakeSessionService {
@@ -496,6 +542,7 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	if _, ok := f.sessions[sessionID]; !ok {
 		return plane.ExecResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
+	f.execTimeouts = append(f.execTimeouts, timeoutSec)
 	return plane.ExecResult{
 		Stdout:            "exec output\n",
 		ExitCode:          0,

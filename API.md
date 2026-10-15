@@ -333,6 +333,11 @@ curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/exec" \
 The response uses the same envelope as `/run`. A non-zero command exit uses
 `error.code: "exec_failed"`.
 
+`timeout` is in seconds, as for `/run`: unset uses the policy default and
+larger values are capped at the policy max (`limits.max_execution_ms`). A
+paused sandbox is resumed first, exactly like `POST /session/{id}/resume`, so
+the request also waits for the resume.
+
 ### `POST /session/{sandboxID}/pause`
 
 Snapshots VM/device state, memory, and the writable disk, releases active CPU

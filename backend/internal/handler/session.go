@@ -331,8 +331,12 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				return
 			}
 
+			// Same rule as /run: unset uses the policy default, and the policy max
+			// (advertised as max_execution_ms / timeout_limit_ms) is enforced.
+			execTimeoutSec := int(resolveDuration(&req.Timeout, auth.Config.DefaultExecTimeout, auth.Config.MaxExecTimeout).Seconds())
+
 			start := time.Now()
-			result, err := mgr.Exec(r.Context(), sessionID, req.Command, req.Timeout)
+			result, err := mgr.Exec(r.Context(), sessionID, req.Command, execTimeoutSec)
 			if err != nil {
 				slog.Error("session exec failed", "session_id", sessionID, "err", err)
 				http.Error(w, err.Error(), http.StatusNotFound)
