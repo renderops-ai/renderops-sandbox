@@ -41,6 +41,9 @@ services:
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
       TERMINAL_ALLOWED_ORIGINS: ${TERMINAL_ALLOWED_ORIGINS:-dev.renderops.com}
       PREVIEW_DOMAIN: ${PREVIEW_DOMAIN:-dev-sandbox.renderops.com}
+      # Decrypts saved model provider credentials for the model relay; same value
+      # as the platform's. Unset disables model access for agent sessions.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,6 +89,8 @@ services:
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-renderops-dev}
       GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      # Encrypts model provider credentials saved on the Secrets page.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
