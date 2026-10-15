@@ -127,7 +127,7 @@ Request fields:
 | `image` | string | no | Legacy image id (`alpine`, `agents`), used only when `os` and `template` are unset; a value that disagrees with them is rejected |
 | `metadata` | object | no | Caller-owned labels stored with the sandbox |
 | `env` | object of strings | no | Environment injected into guest executions |
-| `size` | string | no | `nano`, `small`, or `medium`; defaults to `nano` |
+| `size` | string | no | `nano`, `small`, `medium` or `large`; defaults to `nano`. Each template runs at the sizes `GET /v1/catalog` lists for it |
 | `resources` | object | no | Exact canonical shape; takes precedence over `size` |
 | `network.internet` | boolean | no | Enables guest egress; defaults to `true` |
 | `idle_timeout_s` | integer | no | Auto-pause interval; capped by policy/lifetime |
@@ -496,13 +496,16 @@ the sizes each template runs at, and the size specs.
   "os": [{
     "id": "alpine", "name": "Alpine Linux 3.22",
     "templates": [
-      {"id": "base", "name": "Base", "description": "Python 3.12, Node 22, git", "sizes": ["nano", "small", "medium"]},
-      {"id": "agents", "name": "Agents", "description": "Base plus Claude Code and Codex", "sizes": ["large"]}
+      {"id": "base", "name": "Base", "description": "Python 3.12, Node 22, git", "sizes": ["nano", "small", "medium"], "image": "alpine"},
+      {"id": "agents", "name": "Agents", "description": "Base plus Claude Code and Codex", "sizes": ["large"], "image": "agents"}
     ]
   }],
   "sizes": [{"name": "nano", "vcpus": 1, "memory_mb": 256, "disk_gb": 1}, "..."]
 }
 ```
+
+`image` is the image id a sandbox of that template records (the legacy `image`
+create field), so a client can show an existing sandbox's OS and template.
 
 A create request for a template at a size it does not list fails with `400
 size_not_available`; an unknown OS or template fails with `400 invalid_template`.

@@ -61,7 +61,9 @@ type Template struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Sizes       []string `json:"sizes"`
-	image       string
+	// Image is the rootfs image the template boots, as stored on a sandbox; clients
+	// use it to label existing sandboxes with their OS and template.
+	Image string `json:"image"`
 }
 
 // OS is a base operating system and the templates available on it.
@@ -75,8 +77,8 @@ var catalog = []OS{{
 	ID:   "alpine",
 	Name: "Alpine Linux 3.22",
 	Templates: []Template{
-		{ID: "base", Name: "Base", Description: "Python 3.12, Node 22, git", image: Default},
-		{ID: "agents", Name: "Agents", Description: "Base plus Claude Code and Codex", image: "agents"},
+		{ID: "base", Name: "Base", Description: "Python 3.12, Node 22, git", Image: Default},
+		{ID: "agents", Name: "Agents", Description: "Base plus Claude Code and Codex", Image: "agents"},
 	},
 }}
 
@@ -86,7 +88,7 @@ func Catalog() []OS {
 	for i, os := range catalog {
 		out[i] = OS{ID: os.ID, Name: os.Name, Templates: make([]Template, len(os.Templates))}
 		for j, t := range os.Templates {
-			t.Sizes = Sizes(t.image)
+			t.Sizes = Sizes(t.Image)
 			out[i].Templates[j] = t
 		}
 	}
@@ -117,11 +119,11 @@ func Resolve(os, template, image string) (string, error) {
 				continue
 			}
 			if image != "" {
-				if normalized, err := Normalize(image); err != nil || normalized != t.image {
+				if normalized, err := Normalize(image); err != nil || normalized != t.Image {
 					return "", fmt.Errorf("image %q conflicts with os %q and template %q", image, os, template)
 				}
 			}
-			return t.image, nil
+			return t.Image, nil
 		}
 		return "", fmt.Errorf("unknown template %q for os %q (available: %s)", template, os, strings.Join(templateIDs(o), ", "))
 	}
@@ -133,7 +135,7 @@ func Resolve(os, template, image string) (string, error) {
 func Describe(image string) (os, template string) {
 	for _, o := range catalog {
 		for _, t := range o.Templates {
-			if t.image == image {
+			if t.Image == image {
 				return o.ID, t.ID
 			}
 		}
