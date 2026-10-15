@@ -12,9 +12,12 @@ import (
 	"backend/internal/logstream"
 	"backend/internal/metering"
 	"backend/internal/middleware"
+	"backend/internal/modelrelay"
 	"backend/internal/orchestrator"
+	"backend/internal/plane"
 	"backend/internal/platform"
 	"backend/internal/preview"
+	"backend/internal/secrets"
 	"backend/internal/terminal"
 	"context"
 	"encoding/json"
@@ -107,6 +110,19 @@ func main() {
 	}
 	ideWorkers := agent.NewIDEClient(cfg.WorkerToken)
 
+	// Model access: sandboxes call their agent's model through the worker's model
+	// proxy and this relay, which adds the owner's saved provider key.
+	var secretsKey []byte
+	if cfg.SecretsEncryptionKey != "" {
+		if secretsKey, err = secrets.ParseKey(cfg.SecretsEncryptionKey); err != nil {
+			slog.Error("invalid SECRETS_ENCRYPTION_KEY", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("SECRETS_ENCRYPTION_KEY not set; model access for agent sessions is disabled")
+	}
+	modelWorkers := agent.NewModelAccessClient(cfg.WorkerToken)
+
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
@@ -114,11 +130,16 @@ func main() {
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ports/{port}/preview", handler.CreatePreviewHandler(svc, previewSigner, cfg.PreviewDomain))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ide/sessions", handler.CreateIDESessionHandler(svc, orchestratorClient, ideWorkers, ideSigner, cfg.PreviewDomain))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/model-access", handler.CreateModelAccessHandler(svc, orchestratorClient, modelWorkers, platformClient, secretsKey))
+	publicMux.HandleFunc("DELETE /v1/sandboxes/{sandboxID}/model-access", handler.DeleteModelAccessHandler(svc, orchestratorClient, modelWorkers))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)
 	rootMux.Handle(metering.Route, metering.Handler(platformClient, cfg.WorkerToken))
 	rootMux.Handle(logstream.Route, logstream.Handler(platformClient, cfg.WorkerToken))
+	if len(secretsKey) > 0 {
+		rootMux.Handle(plane.RouteModelRelay, modelrelay.New(platformClient, secretsKey, cfg.WorkerToken))
+	}
 	rootMux.HandleFunc("GET /v1/terminals/{terminalID}", handler.AttachTerminalHandler(orchestratorClient, terminalWorkers, terminalManager, cfg.TerminalAllowedOrigins))
 	rootMux.Handle("/", middleware.Auth(platformClient, executionPolicy, billingConfig)(publicMux))
 

@@ -510,6 +510,68 @@ create field), so a client can show an existing sandbox's OS and template.
 A create request for a template at a size it does not list fails with `400
 size_not_available`; an unknown OS or template fails with `400 invalid_template`.
 
+`agents` lists the coding agents a session can run in the `agents` template and
+the model provider each uses. `available: false` (Codex, GPT models) is shown but
+cannot be granted yet:
+
+```json
+"agents": [
+  {"id": "claude-code", "name": "Claude Code", "provider": "anthropic", "template": "agents", "available": true},
+  {"id": "codex", "name": "Codex", "provider": "openai", "template": "agents", "available": false, "note": "GPT models are coming soon"}
+]
+```
+
+## Model Access
+
+An agent in a sandbox calls its model through the platform; provider keys never
+enter the sandbox. The sandbox owner saves their provider credentials on the
+dashboard's Secrets page (stored encrypted). Granting access opens a model proxy
+on the sandbox's own gateway (`http://172.16.0.1:7081`), reachable only from
+inside that sandbox. The guest presents a random proxy token; the worker forwards
+to the control plane, which adds the saved key and allows only the saved model.
+Pause and destroy revoke the grant.
+
+### `POST /v1/sandboxes/{sandboxID}/model-access`
+
+The sandbox must be active and owned by the caller.
+
+```json
+{"provider": "anthropic"}
+```
+
+`201 Created`:
+
+```json
+{
+  "status": "success",
+  "provider": "anthropic",
+  "model": "claude-opus-5-5",
+  "base_url": "http://172.16.0.1:7081",
+  "token": "<proxy token>",
+  "expires_at": "2026-10-16T16:00:00Z",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://172.16.0.1:7081",
+    "ANTHROPIC_AUTH_TOKEN": "<proxy token>",
+    "ANTHROPIC_MODEL": "claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-5-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-opus-5-5",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+Pass `env` to the agent process (for example in an exec command). Grants last
+4 hours; grant again to extend. Errors: `409 credentials_missing` (nothing saved
+on the Secrets page), `409 sandbox_not_active`, `400 provider_unavailable`
+(`openai`), `503 model_access_unavailable` (server has no
+`SECRETS_ENCRYPTION_KEY`).
+
+### `DELETE /v1/sandboxes/{sandboxID}/model-access`
+
+Revokes the grant. `204 No Content`; idempotent.
+
 ## Port Previews
 
 ### `POST /v1/sandboxes/{sandboxID}/ports/{port}/preview`

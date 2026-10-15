@@ -18,6 +18,9 @@ type Config struct {
 	WorkerToken            string
 	TerminalAllowedOrigins []string
 	PreviewDomain          string
+	// SecretsEncryptionKey decrypts users' saved model provider credentials
+	// (internal/secrets) for the model relay. Empty disables model access.
+	SecretsEncryptionKey string
 }
 
 // Load reads only control-plane settings. It performs no worker host or asset
@@ -33,6 +36,7 @@ func Load() (*Config, error) {
 		WorkerToken:            strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
 		TerminalAllowedOrigins: splitCSV(os.Getenv("TERMINAL_ALLOWED_ORIGINS")),
 		PreviewDomain:          defaultString(strings.TrimSpace(os.Getenv("PREVIEW_DOMAIN")), "dev-sandbox.renderops.com"),
+		SecretsEncryptionKey:   strings.TrimSpace(os.Getenv("SECRETS_ENCRYPTION_KEY")),
 	}
 
 	if cfg.DatabaseURL == "" {

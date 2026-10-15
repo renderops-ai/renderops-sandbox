@@ -27,7 +27,8 @@ type Server struct {
 	admission *Admission
 	draining  atomic.Bool
 	dialer    namespaceDialer
-	git       gitAccessProxy // nil until SetGitProxy
+	git       gitAccessProxy   // nil until SetGitProxy
+	model     modelAccessProxy // nil until SetModelProxy
 }
 
 // NewServer builds a worker HTTP server. token is the internal shared secret the
@@ -213,6 +214,12 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 
 	case op == "git-access" && r.Method == http.MethodDelete:
 		s.revokeGitAccess(w, id)
+
+	case op == "model-access" && r.Method == http.MethodPut:
+		s.grantModelAccess(w, r, id)
+
+	case op == "model-access" && r.Method == http.MethodDelete:
+		s.revokeModelAccess(w, id)
 
 	case op == "" && r.Method == http.MethodDelete:
 		if err := s.svc.Destroy(r.Context(), id); err != nil {

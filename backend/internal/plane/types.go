@@ -72,6 +72,22 @@ type GitAccessResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// ModelAccessRequest lets a sandbox call one model through the worker's model
+// proxy. Token is a random proxy token the guest presents; it is not a
+// provider key, which stays on the control plane.
+type ModelAccessRequest struct {
+	Provider  string    `json:"provider"` // "anthropic"
+	Model     string    `json:"model"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// ModelAccessResponse is the address the guest's agent calls.
+type ModelAccessResponse struct {
+	BaseURL   string    `json:"base_url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // RunRequest runs code in a sandbox.
 type RunRequest struct {
 	Code     string `json:"code"`
