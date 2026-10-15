@@ -7,10 +7,12 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/checkpoint"
 	"backend/internal/executor/firecracker"
+	"backend/internal/gitproxy"
 	"backend/internal/ide"
 	"backend/internal/logagent"
 	"backend/internal/logstream"
 	"backend/internal/metering"
+	"backend/internal/modelproxy"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	workerv1 "backend/internal/rpc/worker/v1"
@@ -399,6 +401,30 @@ func main() {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
 	workerServer := worker.NewServerWithAdmission(sessionMgr, token, admission)
+	// Read-only git access for agent sessions: the proxy keeps short-lived,
+	// repository-scoped tokens in memory and serves each guest on its gateway.
+	gitProxy, err := gitproxy.New(gitproxy.Config{Upstream: env("GIT_PROXY_UPSTREAM", "https://github.com")})
+	if err != nil {
+		slog.Error("configure git proxy", "err", err)
+		os.Exit(1)
+	}
+	defer gitProxy.Close()
+	workerServer.SetGitProxy(gitProxy)
+	sessionMgr.AddSlotRevoker(gitProxy.Unbind)
+	// Model access for agent sessions: the proxy holds only per-grant proxy tokens
+	// and forwards to the control plane's relay, which holds the provider keys.
+	if relayURL := os.Getenv("CONTROL_PLANE_INTERNAL_URL"); relayURL != "" && token != "" {
+		modelProxy, err := modelproxy.New(modelproxy.Config{RelayURL: relayURL, WorkerToken: token})
+		if err != nil {
+			slog.Error("configure model proxy", "err", err)
+			os.Exit(1)
+		}
+		defer modelProxy.Close()
+		workerServer.SetModelProxy(modelProxy)
+		sessionMgr.AddSlotRevoker(modelProxy.Unbind)
+	} else {
+		slog.Warn("CONTROL_PLANE_INTERNAL_URL or WORKER_TOKEN not set; model access for agent sessions is disabled")
+	}
 	// Reuse the host worker process, with an independently configurable endpoint.
 	if endpoint := env("WORKER_LOG_INGEST_URL", ""); endpoint != "" {
 		collector, err := logagent.New(env("WORKER_LOG_SPOOL_DIR", filepath.Join(cfg.RootDirectory, "logs", "pending")), endpoint, token, os.Getenv("WORKER_ID"))

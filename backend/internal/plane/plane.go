@@ -15,8 +15,14 @@ const (
 	RouteHealth        = "/worker/health"
 	RouteCapacity      = "/worker/capacity"
 	RouteSandbox       = "/worker/sandbox"  // POST — create
-	RouteSandboxPrefix = "/worker/sandbox/" // {id}[/run|exec|pause|resume]; DELETE /{id}
+	RouteSandboxPrefix = "/worker/sandbox/" // {id}[/run|exec|pause|resume]; PUT|DELETE /{id}/git-access|model-access; DELETE /{id}
 	RouteSandboxIDE    = "/worker/sandbox/{sandboxID}/ide"
+
+	// RouteModelRelay is the control plane's model relay, called by worker model
+	// proxies with the worker token: /internal/model/{provider}/{api path}.
+	RouteModelRelay = "/internal/model/"
+	// SandboxIDHeader names the sandbox a worker relays a model request for.
+	SandboxIDHeader = "X-Sandbox-ID"
 )
 
 type IDEInstance struct {
