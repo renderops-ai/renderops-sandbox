@@ -8,6 +8,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -140,12 +141,43 @@ func (s *Service) Destroy(ctx context.Context, sessionID string) error {
 	return s.orchestrator.Destroy(ctx, sessionID)
 }
 
+// worker returns a client for the worker running the sandbox, resuming the
+// sandbox first if it is paused (see activePlacement).
 func (s *Service) worker(ctx context.Context, sandboxID string) (*agent.Client, error) {
-	placement, err := s.orchestrator.Placement(ctx, sandboxID)
+	placement, err := activePlacement(ctx, s.orchestrator, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve sandbox worker: %w", err)
+		return nil, err
 	}
 	return agent.NewClient(placement.Endpoint, s.workerToken), nil
+}
+
+// placementResumer is the part of the orchestrator client activePlacement needs.
+type placementResumer interface {
+	Placement(ctx context.Context, sandboxID string) (orchestrator.Placement, error)
+	Resume(ctx context.Context, sandboxID string) error
+}
+
+// activePlacement resolves the sandbox's worker. A paused sandbox is resumed
+// first through the orchestrator, the same path as POST /session/{id}/resume:
+// the row moves paused -> resuming -> active with capacity reserved, and a
+// failed resume returns it to paused. Sending the command straight to the
+// worker instead would let the worker restore the VM on its own, which the
+// orchestrator rejects (paused -> active), leaving the VM running while the
+// sandbox still reads as paused.
+func activePlacement(ctx context.Context, orch placementResumer, sandboxID string) (orchestrator.Placement, error) {
+	placement, err := orch.Placement(ctx, sandboxID)
+	if err != nil {
+		return orchestrator.Placement{}, fmt.Errorf("resolve sandbox worker: %w", err)
+	}
+	if placement.State != "paused" {
+		return placement, nil
+	}
+	slog.Info("resuming paused sandbox before execution", "sandbox_id", sandboxID, "worker_id", placement.WorkerID)
+	if err := orch.Resume(ctx, sandboxID); err != nil {
+		return orchestrator.Placement{}, fmt.Errorf("resume paused sandbox %s: %w", sandboxID, err)
+	}
+	placement.State = "active"
+	return placement, nil
 }
 
 // GetSession reads the sandbox row; destroyed sandboxes read as gone.
