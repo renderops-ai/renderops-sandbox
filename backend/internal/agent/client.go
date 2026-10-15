@@ -19,6 +19,11 @@ import (
 // memory and disk to or from Blob, which takes minutes for large sandboxes.
 const LifecycleTimeout = 10 * time.Minute
 
+// ExecMargin is added to an exec's own timeout for the HTTP call that carries
+// it. The worker waits for the guest up to the command timeout plus 10s, so the
+// worker's answer (or its timeout error) gets back instead of a timeout here.
+const ExecMargin = 30 * time.Second
+
 type Client struct {
 	base      string // e.g. http://127.0.0.1:19876
 	token     string
@@ -48,10 +53,24 @@ func (c *Client) Run(ctx context.Context, id string, req plane.RunRequest) (plan
 	return out, err
 }
 
+// Exec runs a shell command. The call is allowed the command's own timeout plus
+// ExecMargin, so long commands (agent runs) are not cut off by the default
+// client timeout.
 func (c *Client) Exec(ctx context.Context, id string, req plane.ExecRequest) (plane.ExecResult, error) {
 	var out plane.ExecResult
-	err := c.do(ctx, http.MethodPost, plane.RouteSandboxPrefix+id+"/exec", req, &out)
+	err := c.doWith(ctx, c.execClient(req.TimeoutS), http.MethodPost, plane.RouteSandboxPrefix+id+"/exec", req, &out)
 	return out, err
+}
+
+// execClient returns the HTTP client for an exec that may run for timeoutS
+// seconds. Without a timeout the worker uses its short default, which the
+// regular client already covers.
+func (c *Client) execClient(timeoutS int) *http.Client {
+	limit := time.Duration(timeoutS)*time.Second + ExecMargin
+	if limit <= c.http.Timeout {
+		return c.http
+	}
+	return &http.Client{Transport: c.http.Transport, Timeout: limit}
 }
 
 func (c *Client) Pause(ctx context.Context, id string) error {
