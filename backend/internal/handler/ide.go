@@ -25,6 +25,10 @@ type IDEWorker interface {
 	StartIDE(context.Context, string, string) (plane.IDEInstance, error)
 }
 
+// ideSkipWelcomePayload is the OpenVSCode workbench URL payload that skips the
+// first-run welcome and walkthrough.
+const ideSkipWelcomePayload = `[["skipWelcome","true"]]`
+
 type CreateIDESessionResponse struct {
 	URL       string    `json:"url"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -74,7 +78,12 @@ func CreateIDESessionHandler(
 			return
 		}
 		host := strconv.Itoa(int(instance.Port)) + "-" + sandboxID + "." + previewDomain
-		ideURL := url.URL{Scheme: "https", Host: host, Path: "/", RawQuery: "ro_auth=" + url.QueryEscape(token)}
+		// skipWelcome: each sandbox's IDE is a new origin, so the browser treats
+		// every first open as a first run and shows the setup walkthrough before
+		// it has read the machine settings. The gateway keeps this parameter when
+		// it swaps ro_auth for the session cookie.
+		query := url.Values{"ro_auth": {token}, "payload": {ideSkipWelcomePayload}}
+		ideURL := url.URL{Scheme: "https", Host: host, Path: "/", RawQuery: query.Encode()}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusCreated)

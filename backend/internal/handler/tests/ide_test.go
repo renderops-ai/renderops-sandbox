@@ -60,6 +60,9 @@ func TestCreateIDESessionStartsWorkerAndReturnsHandoffURL(t *testing.T) {
 	if parsed.Host != "3001-"+previewSandboxID+".dev-sandbox.renderops.com" || workers.calls != 1 {
 		t.Fatalf("url=%q worker_calls=%d", created.URL, workers.calls)
 	}
+	if payload := parsed.Query().Get("payload"); payload != `[["skipWelcome","true"]]` {
+		t.Fatalf("payload=%q, want the skipWelcome workbench payload", payload)
+	}
 	claimsToken := parsed.Query().Get("ro_auth")
 	nonces := ideauth.NewMemoryNonceStore()
 	if _, _, err := signer.Redeem(context.Background(), claimsToken, previewSandboxID, ide.DefaultPort, nonces); err != nil {
