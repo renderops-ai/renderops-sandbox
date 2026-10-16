@@ -48,6 +48,10 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Check deploy path filters cover each service's packages
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/check-deploy-filters.sh
+
       - name: Test worker rootfs and kernel activation
         working-directory: ${{ github.workspace }}
         run: |
