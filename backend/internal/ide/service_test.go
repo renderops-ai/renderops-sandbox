@@ -2,8 +2,11 @@ package ide
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,11 +46,96 @@ func TestServiceStartsOpenVSCodeWithoutApplicationAuthentication(t *testing.T) {
 		"--host 0.0.0.0",
 		"--port 3001",
 		"--without-connection-token",
-		"'/workspace'",
+		`--server-data-dir "$data_dir"`,
+		"--default-folder '/workspace'",
+		"--disable-workspace-trust",
+		"--telemetry-level off",
+		strings.Join(machineSettingsCommands(), "; "),
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("start command missing %q: %s", expected, command)
 		}
+	}
+	// The settings must be in place before the server starts.
+	if strings.Index(command, "settings_file") > strings.Index(command, "nohup") {
+		t.Fatalf("settings are written after the server starts: %s", command)
+	}
+}
+
+func TestMachineSettingsHoldTheIDEDefaults(t *testing.T) {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(machineSettings), &settings); err != nil {
+		t.Fatalf("machine settings are not JSON: %v", err)
+	}
+	want := map[string]any{
+		"workbench.startupEditor":                          "none",
+		"workbench.welcomePage.walkthroughs.openOnInstall": false,
+		"workbench.tips.enabled":                           false,
+		"workbench.colorTheme":                             "Default Dark Modern",
+		"extensions.ignoreRecommendations":                 true,
+		"chat.disableAIFeatures":                           true,
+		"git.openRepositoryInParentFolders":                "always",
+		"git.autofetch":                                    false,
+	}
+	if len(settings) != len(want) {
+		t.Fatalf("settings=%v, want %v", settings, want)
+	}
+	for key, value := range want {
+		if settings[key] != value {
+			t.Fatalf("%s=%v, want %v", key, settings[key], value)
+		}
+	}
+}
+
+func TestMachineSettingsCommandsWriteDefaultsOnce(t *testing.T) {
+	home := t.TempDir()
+	script := "set -eu; " + strings.Join(machineSettingsCommands(), "; ") + `; printf '%s' "$data_dir"`
+	run := func() string {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Env = []string{"HOME=" + home + "/", "PATH=" + os.Getenv("PATH")}
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("settings commands failed: %v: %s", err, output)
+		}
+		return string(output)
+	}
+
+	dataDir := run()
+	if dataDir != filepath.Join(home, ".openvscode-server") {
+		t.Fatalf("data_dir=%q, want %q", dataDir, filepath.Join(home, ".openvscode-server"))
+	}
+	settingsFile := filepath.Join(dataDir, "data", "Machine", "settings.json")
+	written, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("read machine settings: %v", err)
+	}
+	if string(written) != machineSettings {
+		t.Fatalf("machine settings=%q, want %q", written, machineSettings)
+	}
+	info, err := os.Stat(filepath.Dir(settingsFile))
+	if err != nil {
+		t.Fatalf("stat machine settings directory: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("machine settings directory mode=%v, want 0700", info.Mode().Perm())
+	}
+
+	// A file that already exists is the user's: a restart keeps it as is.
+	userSettings := "{\n  \"workbench.colorTheme\": \"Default Light Modern\"\n}\n"
+	if err := os.WriteFile(settingsFile, []byte(userSettings), 0o644); err != nil {
+		t.Fatalf("write user settings: %v", err)
+	}
+	run()
+	kept, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("read machine settings after restart: %v", err)
+	}
+	if string(kept) != userSettings {
+		t.Fatalf("restart rewrote the user's settings: %q", kept)
+	}
+	if _, err := os.Stat(settingsFile + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary settings file left behind: %v", err)
 	}
 }
 
