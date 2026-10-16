@@ -200,6 +200,7 @@ func TestSystemPrompt(t *testing.T) {
 	prompt := systemPrompt(s, "spawn/5be67472", "dev-sandbox.renderops.com")
 	for _, want := range []string{
 		"/workspace/repo on branch spawn/5be67472", "GitHub issue #2: Validate events", "cannot push",
+		"Stay on that branch", "Create PR button",
 		"setsid nohup", "0.0.0.0", "server.allowedHosts: ['.dev-sandbox.renderops.com']", "Port 3001", "TMPDIR",
 		"Never print environment variables",
 	} {
