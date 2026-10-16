@@ -479,6 +479,8 @@ type fakePlatformService struct {
 	logCh         chan error
 	logDelay      time.Duration
 	auditCh       chan platform.AuditEvent
+	runCh         chan platform.SandboxRun // receives each InsertSandboxRun when set
+	sandboxLogCh  chan platform.SandboxLog // receives each InsertSandboxLog when set
 }
 
 func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, error) {
@@ -518,9 +520,17 @@ func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.San
 func (f *fakePlatformService) UpdateSandboxDetails(ctx context.Context, sb platform.Sandbox) error {
 	return nil
 }
-func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)      {}
-func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog)   {}
-func (f *fakePlatformService) InsertSandboxRun(ctx context.Context, run platform.SandboxRun) {}
+func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string) {}
+func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog) {
+	if f.sandboxLogCh != nil {
+		f.sandboxLogCh <- l
+	}
+}
+func (f *fakePlatformService) InsertSandboxRun(ctx context.Context, run platform.SandboxRun) {
+	if f.runCh != nil {
+		f.runCh <- run
+	}
+}
 func (f *fakePlatformService) BillSandboxRuntime(ctx context.Context, sandboxID string, ratePerSec float64) {
 }
 func (f *fakePlatformService) ListSandboxes(ctx context.Context, userID string) ([]platform.SandboxListItem, error) {
@@ -532,10 +542,11 @@ func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error
 }
 
 type fakeSessionService struct {
-	mu           sync.Mutex
-	sessions     map[string]*plane.SessionInfo
-	createErr    error
-	execTimeouts []int // timeoutSec of each Exec call
+	mu            sync.Mutex
+	sessions      map[string]*plane.SessionInfo
+	createErr     error
+	execTimeouts  []int    // timeoutSec of each Exec call
+	quietCommands []string // command of each ExecQuiet call
 }
 
 func newFakeSessionService() *fakeSessionService {
@@ -551,6 +562,23 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	f.execTimeouts = append(f.execTimeouts, timeoutSec)
 	return plane.ExecResult{
 		Stdout:            "exec output\n",
+		ExitCode:          0,
+		TerminationReason: "success",
+	}, nil
+}
+
+// ExecQuiet answers like Exec. Neither reports the worker's log feed as on, so
+// the handler's own copy into sandbox_logs is what a test sees.
+func (f *fakeSessionService) ExecQuiet(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.sessions[sessionID]; !ok {
+		return plane.ExecResult{}, fmt.Errorf("session %s not found", sessionID)
+	}
+	f.quietCommands = append(f.quietCommands, command)
+	return plane.ExecResult{
+		Stdout:            "exec output\n",
+		Stderr:            "exec warning\n",
 		ExitCode:          0,
 		TerminationReason: "success",
 	}, nil

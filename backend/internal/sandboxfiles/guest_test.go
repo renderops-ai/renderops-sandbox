@@ -175,10 +175,10 @@ type recordedCall struct {
 	passive bool
 }
 
-func (r *recorder) exec(ctx context.Context, command string, timeoutS int, passive bool) (plane.ExecResult, error) {
+func (r *recorder) exec(ctx context.Context, command string, timeoutS int, opts plane.ExecOptions) (plane.ExecResult, error) {
 	r.mu.Lock()
 	n := len(r.calls)
-	r.calls = append(r.calls, recordedCall{size: len(command), passive: passive})
+	r.calls = append(r.calls, recordedCall{size: len(command), passive: opts.Passive})
 	before := r.before
 	r.mu.Unlock()
 	if before != nil {
@@ -188,6 +188,10 @@ func (r *recorder) exec(ctx context.Context, command string, timeoutS int, passi
 	}
 	if timeoutS <= 0 {
 		return plane.ExecResult{}, errors.New("every files command needs a timeout")
+	}
+	// Files output is file contents: it must never reach the log stream.
+	if !opts.Quiet {
+		return plane.ExecResult{}, errors.New("every files command must be quiet")
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutS)*time.Second)
 	defer cancel()

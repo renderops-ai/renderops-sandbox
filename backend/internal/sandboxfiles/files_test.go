@@ -14,7 +14,7 @@ import (
 // noExecClient returns a client that fails the test if it reaches the guest.
 func noExecClient(t *testing.T) *Client {
 	t.Helper()
-	exec := func(context.Context, string, int, bool) (plane.ExecResult, error) {
+	exec := func(context.Context, string, int, plane.ExecOptions) (plane.ExecResult, error) {
 		t.Fatal("the request must be refused before it reaches the sandbox")
 		return plane.ExecResult{}, nil
 	}
@@ -189,7 +189,7 @@ func TestParseOutput(t *testing.T) {
 func TestClientReportsBrokenGuestOutput(t *testing.T) {
 	for _, stdout := range []string{"", "spawn-files 1\nsize 1\n", "spawn-files 1\ndata content\nabc"} {
 		c := &Client{
-			exec: func(context.Context, string, int, bool) (plane.ExecResult, error) {
+			exec: func(context.Context, string, int, plane.ExecOptions) (plane.ExecResult, error) {
 				return plane.ExecResult{Stdout: stdout, ExitCode: 2}, nil
 			},
 			cfg: defaultConfig(),

@@ -585,14 +585,18 @@ func (m *Manager) lockCreate(sandboxID string) func() {
 // resume it (ExecOptions.ActiveOnly).
 var ErrNotActive = errors.New("session is not active")
 
-// ExecOptions changes how ExecWithOptions treats the session's lifecycle. The
-// zero value is Exec's behavior.
+// ExecOptions changes how ExecWithOptions treats the session's lifecycle and
+// the command's output. The zero value is Exec's behavior.
 type ExecOptions struct {
 	// ActiveOnly fails with ErrNotActive instead of resuming a paused session.
 	ActiveOnly bool
 	// Passive does not count the command as activity: LastUsed (the idle
 	// timer), RunCount and LastExitCode are left alone.
 	Passive bool
+	// Quiet asks the guest to keep the command's output out of the sandbox's
+	// log stream; the output is still returned. Guests built before this
+	// option ignore it.
+	Quiet bool
 }
 
 // Exec runs a shell command in the session's persistent bash process
@@ -600,7 +604,13 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 	return m.ExecWithOptions(ctx, sessionID, command, timeoutSec, ExecOptions{})
 }
 
-// ExecWithOptions is Exec with lifecycle options (see ExecOptions).
+// ExecQuiet is Exec for platform-internal commands (the IDE's): the guest
+// keeps the command's output out of the sandbox's log stream.
+func (m *Manager) ExecQuiet(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
+	return m.ExecWithOptions(ctx, sessionID, command, timeoutSec, ExecOptions{Quiet: true})
+}
+
+// ExecWithOptions is Exec with exec options (see ExecOptions).
 func (m *Manager) ExecWithOptions(ctx context.Context, sessionID, command string, timeoutSec int, opts ExecOptions) (executor.ExecutionResult, error) {
 	if !opts.ActiveOnly {
 		// Transparently resume a paused session before running.
@@ -632,7 +642,7 @@ func (m *Manager) ExecWithOptions(ctx context.Context, sessionID, command string
 	}
 
 	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
-	resp, err := vsockClient.ExecOnConn(sess.VsockConn, command, timeoutSec)
+	resp, err := vsockClient.ExecOnConnWithOptions(sess.VsockConn, command, timeoutSec, firecracker.ExecOptions{Quiet: opts.Quiet})
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("exec failed: %w", err)
 	}

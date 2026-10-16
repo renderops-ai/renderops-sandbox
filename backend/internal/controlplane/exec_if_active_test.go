@@ -46,7 +46,7 @@ func TestExecIfActiveRunsOnTheSandboxWorker(t *testing.T) {
 		SandboxID: "sandbox-1", WorkerID: "worker-1", Endpoint: "http://worker-1:19876", State: "active",
 	}}
 	worker := &fakeWorkerExecer{}
-	req := plane.ExecRequest{Command: "true", TimeoutS: 30, ActiveOnly: true, Passive: true}
+	req := plane.ExecRequest{Command: "true", TimeoutS: 30, ActiveOnly: true, Passive: true, Quiet: true}
 	res, err := execIfActive(context.Background(), orch, func(endpoint string) workerExecer {
 		worker.endpoint = endpoint
 		return worker
@@ -84,11 +84,11 @@ func TestExecIfActiveReportsAWorkerThatSawThePause(t *testing.T) {
 	}}
 	_, err := execIfActive(context.Background(), orch, func(endpoint string) workerExecer {
 		return agent.NewClient(endpoint, "secret")
-	}, "sandbox-1", plane.ExecRequest{Command: "true", ActiveOnly: true, Passive: true})
+	}, "sandbox-1", plane.ExecRequest{Command: "true", ActiveOnly: true, Passive: true, Quiet: true})
 	if !errors.Is(err, plane.ErrSandboxNotActive) {
 		t.Fatalf("error = %v, want ErrSandboxNotActive", err)
 	}
-	if !got.ActiveOnly || !got.Passive {
-		t.Fatalf("worker got %+v, want active_only and passive", got)
+	if !got.ActiveOnly || !got.Passive || !got.Quiet {
+		t.Fatalf("worker got %+v, want active_only, passive and quiet", got)
 	}
 }

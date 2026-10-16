@@ -42,6 +42,55 @@ func fakeGuest(t *testing.T, conn net.Conn) {
 	}()
 }
 
+// A quiet exec reaches the guest with quiet set; any other exec sends no quiet
+// field at all, so guests see the request they always have.
+func TestQuietExecAsksTheGuestNotToLog(t *testing.T) {
+	host, guest := net.Pipe()
+	defer host.Close()
+	defer guest.Close()
+	quietFlags := make(chan *bool, 1)
+	go func() {
+		for {
+			var req struct {
+				Quiet *bool `json:"quiet"`
+			}
+			if err := json.NewDecoder(guest).Decode(&req); err != nil {
+				return
+			}
+			quietFlags <- req.Quiet
+			if err := json.NewEncoder(guest).Encode(firecracker.ExecuteResponse{Stdout: "file contents\n"}); err != nil {
+				return
+			}
+		}
+	}()
+
+	m := &Manager{store: NewStore(10)}
+	sess := &Session{ID: "active", State: StateActive, VM: &firecracker.MicroVM{}, VsockConn: host}
+	if err := m.store.Add(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := m.ExecQuiet(context.Background(), "active", "cat notes.txt", 5)
+	if err != nil || res.Stdout != "file contents\n" {
+		t.Fatalf("quiet exec = %+v, %v", res, err)
+	}
+	if quiet := <-quietFlags; quiet == nil || !*quiet {
+		t.Fatalf("ExecQuiet sent quiet = %v, want true", quiet)
+	}
+	if _, err := m.ExecWithOptions(context.Background(), "active", "cat notes.txt", 5, ExecOptions{ActiveOnly: true, Passive: true, Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if quiet := <-quietFlags; quiet == nil || !*quiet {
+		t.Fatalf("ExecWithOptions(Quiet) sent quiet = %v, want true", quiet)
+	}
+	if _, err := m.Exec(context.Background(), "active", "cat notes.txt", 5); err != nil {
+		t.Fatal(err)
+	}
+	if quiet := <-quietFlags; quiet != nil {
+		t.Fatalf("Exec sent quiet = %v, want no quiet field", *quiet)
+	}
+}
+
 func TestPassiveExecLeavesTheIdleTimerAlone(t *testing.T) {
 	host, guest := net.Pipe()
 	defer host.Close()

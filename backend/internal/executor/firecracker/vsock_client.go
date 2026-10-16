@@ -177,13 +177,29 @@ func (v *VsockClient) terminalRequest(conn net.Conn, request any, operation stri
 	return nil
 }
 
+// ExecOptions changes how the guest agent treats one exec. The zero value is
+// ExecOnConn's behavior.
+type ExecOptions struct {
+	// Quiet asks the guest not to copy the command's output into its output
+	// feed (the sandbox's log stream); the output is still returned. A guest
+	// agent built before this option ignores it and copies the output.
+	Quiet bool
+}
+
 // ExecOnConn runs a shell command on an existing persistent connection.
 func (v *VsockClient) ExecOnConn(conn net.Conn, command string, timeoutSec int) (*ExecuteResponse, error) {
+	return v.ExecOnConnWithOptions(conn, command, timeoutSec, ExecOptions{})
+}
+
+// ExecOnConnWithOptions is ExecOnConn with guest exec options. Without
+// options the request is exactly ExecOnConn's.
+func (v *VsockClient) ExecOnConnWithOptions(conn net.Conn, command string, timeoutSec int, opts ExecOptions) (*ExecuteResponse, error) {
 	req := struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
-	}{Type: "exec", Command: command, Timeout: timeoutSec}
+		Quiet   bool   `json:"quiet,omitempty"`
+	}{Type: "exec", Command: command, Timeout: timeoutSec, Quiet: opts.Quiet}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("send exec request: %w", err)

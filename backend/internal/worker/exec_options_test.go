@@ -57,6 +57,19 @@ func TestExecWithLifecycleOptions(t *testing.T) {
 		t.Fatalf("exec with options: %d %v", response.Code, service.options)
 	}
 
+	// Quiet alone keeps the lifecycle of a plain exec (resume, activity).
+	response = postExec(t, server, plane.ExecRequest{Command: "cat notes.txt", Quiet: true})
+	if response.Code != http.StatusOK || len(service.options) != 2 || service.options[1] != (session.ExecOptions{Quiet: true}) {
+		t.Fatalf("quiet exec: %d %v", response.Code, service.options)
+	}
+	response = postExec(t, server, plane.ExecRequest{Command: "cat notes.txt", ActiveOnly: true, Passive: true, Quiet: true})
+	if response.Code != http.StatusOK || len(service.options) != 3 || service.options[2] != (session.ExecOptions{ActiveOnly: true, Passive: true, Quiet: true}) {
+		t.Fatalf("quiet files exec: %d %v", response.Code, service.options)
+	}
+	if service.plainExecs != 1 {
+		t.Fatalf("plain execs = %d, want only the first", service.plainExecs)
+	}
+
 	service.optionsErr = fmt.Errorf("%w: session sandbox-1 is paused", session.ErrNotActive)
 	response = postExec(t, server, plane.ExecRequest{Command: "true", ActiveOnly: true})
 	var body plane.ErrorResponse
@@ -72,5 +85,8 @@ func TestExecWithOptionsNeedsSupport(t *testing.T) {
 	server := NewServer(&fakeSessionService{}, "worker-secret", 10)
 	if response := postExec(t, server, plane.ExecRequest{Command: "true", ActiveOnly: true}); response.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501 rather than an exec that may resume", response.Code)
+	}
+	if response := postExec(t, server, plane.ExecRequest{Command: "true", Quiet: true}); response.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501 rather than an exec whose output is logged", response.Code)
 	}
 }

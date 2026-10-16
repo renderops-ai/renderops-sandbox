@@ -17,7 +17,7 @@ import (
 // FileExecer runs the files API's guest scripts on the sandbox's worker
 // without resuming a paused sandbox (controlplane.Service.ExecIfActive).
 type FileExecer interface {
-	ExecIfActive(ctx context.Context, sandboxID, command string, timeoutSec int, passive bool) (plane.ExecResult, error)
+	ExecIfActive(ctx context.Context, sandboxID, command string, timeoutSec int, opts plane.ExecOptions) (plane.ExecResult, error)
 }
 
 // maxFileWriteBodyBytes fits a 2 MiB file whose every byte is JSON-escaped
@@ -166,8 +166,8 @@ func openFiles(w http.ResponseWriter, r *http.Request, sandboxes plane.Service, 
 		writeTerminalError(w, http.StatusConflict, "sandbox_not_active", "sandbox must be active to read or write files", requestID)
 		return filesRequest{}, false
 	}
-	exec := func(ctx context.Context, command string, timeoutS int, passive bool) (plane.ExecResult, error) {
-		return execer.ExecIfActive(ctx, sandboxID, command, timeoutS, passive)
+	exec := func(ctx context.Context, command string, timeoutS int, opts plane.ExecOptions) (plane.ExecResult, error) {
+		return execer.ExecIfActive(ctx, sandboxID, command, timeoutS, opts)
 	}
 	log := slog.With("component", "files", "request_id", requestID, "sandbox_id", sandboxID)
 	return filesRequest{files: sandboxfiles.New(exec, log), requestID: requestID, sandboxID: sandboxID}, true

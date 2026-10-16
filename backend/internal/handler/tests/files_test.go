@@ -36,8 +36,12 @@ type fileExecCall struct {
 	timeoutS  int
 }
 
-func (f *fakeFileExecer) ExecIfActive(_ context.Context, sandboxID, _ string, timeoutS int, passive bool) (plane.ExecResult, error) {
-	f.calls = append(f.calls, fileExecCall{sandboxID: sandboxID, passive: passive, timeoutS: timeoutS})
+func (f *fakeFileExecer) ExecIfActive(_ context.Context, sandboxID, _ string, timeoutS int, opts plane.ExecOptions) (plane.ExecResult, error) {
+	f.calls = append(f.calls, fileExecCall{sandboxID: sandboxID, passive: opts.Passive, timeoutS: timeoutS})
+	// Files output is file contents: it must never reach the log stream.
+	if !opts.Quiet {
+		return plane.ExecResult{}, fmt.Errorf("guest command %d is not quiet", len(f.calls))
+	}
 	if f.err != nil {
 		return plane.ExecResult{}, f.err
 	}

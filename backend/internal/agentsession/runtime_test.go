@@ -76,7 +76,9 @@ func (f *fakeSandboxes) Pause(context.Context, string) error {
 	return nil
 }
 
-func (f *fakeSandboxes) Exec(_ context.Context, _ string, command string, _ int) (plane.ExecResult, error) {
+// ExecQuiet is the only way the runtime can run a command, so every command
+// these tests see (setup, polls, deliver, stop, workspace) ran quietly.
+func (f *fakeSandboxes) ExecQuiet(_ context.Context, _ string, command string, _ int) (plane.ExecResult, error) {
 	b64, ok := strings.CutPrefix(command, "printf %s ")
 	if !ok || !strings.HasSuffix(b64, " | base64 -d | sh") {
 		return plane.ExecResult{}, fmt.Errorf("not the guest command form: %q", command)

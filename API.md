@@ -338,6 +338,20 @@ larger values are capped at the policy max (`limits.max_execution_ms`). A
 paused sandbox is resumed first, exactly like `POST /session/{id}/resume`, so
 the request also waits for the resume.
 
+Optional `"quiet": true` returns the command's output in the response only:
+it is not copied into the sandbox's log stream (the dashboard's Logs view,
+kept 48 hours) or into usage records. Use it for reads you do not want logged,
+such as file contents. The run itself (command, exit code, duration) is still
+recorded. A sandbox started from a guest image that predates `quiet` still
+logs the output.
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/exec" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"git -C /workspace/repo diff --stat","timeout":10,"quiet":true}'
+```
+
 ### `POST /session/{sandboxID}/pause`
 
 Snapshots VM/device state, memory, and the writable disk, releases active CPU
@@ -507,9 +521,9 @@ and inside `/workspace` after the sandbox resolves symlinks; anything else is
 Reads (tree, content, changes) do not count as sandbox activity: they do not
 reset the idle timer, so a sandbox nobody uses pauses on time even while the
 Code tab polls. Saves do count, like any command. Every request runs a short
-script through the sandbox's shell, and that shell's output goes to the
-sandbox's output log, so file contents read here also appear there (as
-base64).
+script through the sandbox's shell as a quiet exec, so file contents read or
+written here do not appear in the sandbox's output log. (A sandbox started
+from a guest image that predates quiet execs still logs them, as base64.)
 
 ### `GET /v1/sandboxes/{sandboxID}/files/tree?root={dir}`
 
@@ -815,9 +829,13 @@ other worker routes require `X-Worker-Token: $WORKER_TOKEN`.
 | `DELETE` | `/worker/sandbox/{id}` | Destroy local state and release capacity |
 
 An exec body may set `"active_only": true` (refuse a sandbox that is not
-running with `409 sandbox_not_active` instead of resuming it) and
-`"passive": true` (do not reset the idle timer, run count or last exit code).
-The files API sets both for reads and `active_only` for writes.
+running with `409 sandbox_not_active` instead of resuming it),
+`"passive": true` (do not reset the idle timer, run count or last exit code)
+and `"quiet": true` (the guest keeps the output out of the sandbox's log
+stream; the output is still returned). The files API sets `active_only` and
+`quiet` for every command and `passive` for reads. Agent-session commands, the
+workspace checkout and the IDE's commands are quiet too. A guest agent built
+before `quiet` ignores it and logs the output as before.
 
 Terminal create/attach/close uses the internal worker gRPC service on the same
 private listener. Preview traffic uses the worker's sandbox-port proxy path.
