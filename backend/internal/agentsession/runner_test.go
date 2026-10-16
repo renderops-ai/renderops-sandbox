@@ -162,6 +162,8 @@ type fakeGuest struct {
 	previous     []Port
 	previousSent bool
 	recorded     [][]Port
+	// claimEnd is the journal's last turn_end at claim time (first poll).
+	claimEnd *TurnEnd
 }
 
 func (g *fakeGuest) RecordPorts(_ context.Context, ports []Port) error {
@@ -217,6 +219,7 @@ func (g *fakeGuest) Poll(_ context.Context, cursor int64, sig string) (*PollResu
 	g.resumed = false
 	if !g.previousSent {
 		res.Previous, g.previousSent = append([]Port{}, g.previous...), true
+		res.LastTurnEnd = g.claimEnd
 	}
 	return res, nil
 }
@@ -495,8 +498,132 @@ func TestRunnerHoldsMessagesSentBeforeStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, stops, _ := g.snapshot()
-	if stops != 1 || len(deliveries) != 2 || deliveries[1] != (delivery{8, "also this\n\nnow this"}) {
+	// The turn after a Stop says so (the session has no platform
+	// instructions, so the fallback notice).
+	want := "<spawn_notice>\n" + fallbackNotices.Interrupted + "\n</spawn_notice>\n\nalso this\n\nnow this"
+	if stops != 1 || len(deliveries) != 2 || deliveries[1] != (delivery{8, want}) {
 		t.Fatalf("stops %d deliveries %+v", stops, deliveries)
+	}
+}
+
+// testInstructions are platform instructions with recognizable notices.
+var testInstructions = &Instructions{Version: "2026-10-17.1", System: "Rules.",
+	Notices: Notices{Resumed: "R!", Interrupted: " I!\n", TurnFailed: "F!"}}
+
+func notice(lines ...string) string {
+	return "<spawn_notice>\n" + strings.Join(lines, "\n") + "\n</spawn_notice>\n\n"
+}
+
+// Each turn carries the notices for what happened since the previous one,
+// once: a resume, and an interrupted or failed previous turn. The first turn
+// gets none.
+func TestRunnerPrependsTurnNoticesOnce(t *testing.T) {
+	s := newSession()
+	s.Instructions = testInstructions
+	q := &fakeQueue{session: s, messages: []Message{{Seq: 2, Text: "first"}}}
+	// Resumed before the first turn: nothing to say yet (no earlier turn).
+	g := &fakeGuest{resumed: true}
+	next := func(seq int64, text string) {
+		q.set(func(q *fakeQueue) { q.messages = append(q.messages, Message{Seq: seq, Text: text}) })
+	}
+	g.onDeliver = func(g *fakeGuest, seq int64) {
+		switch seq {
+		case 2:
+			next(4, "second")
+			g.endTurn("interrupted", 130)
+		case 4:
+			next(6, "third")
+			g.endTurn("", 0)
+		case 6:
+			next(8, "fourth")
+			g.mu.Lock()
+			g.resumed = true
+			g.mu.Unlock()
+			g.endTurn("", 0)
+		case 8:
+			next(10, "fifth")
+			g.mu.Lock()
+			g.resumed = true
+			g.mu.Unlock()
+			g.endTurn("timeout", 124)
+		case 10:
+			next(12, "sixth")
+			g.endTurn("", 1) // an API error or the step limit
+		default:
+			g.endTurn("", 0)
+		}
+	}
+	if err := runOne(t, testRunner(q, &fakeRuntime{guest: g})); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, _, _ := g.snapshot()
+	want := []delivery{
+		{2, "first"},
+		{4, notice("I!") + "second"},
+		{6, "third"},
+		{8, notice("R!") + "fourth"},
+		{10, notice("R!", "F!") + "fifth"},
+		{12, notice("F!") + "sixth"},
+	}
+	if fmt.Sprintf("%q", deliveries) != fmt.Sprintf("%q", want) {
+		t.Fatalf("deliveries:\n%q\nwant:\n%q", deliveries, want)
+	}
+}
+
+// A follow-up claim knows how the turn before it ended, though that turn_end
+// is behind the committed cursor.
+func TestRunnerNoticesATurnThatEndedBeforeTheClaim(t *testing.T) {
+	for _, c := range []struct {
+		end  TurnEnd
+		want string
+	}{
+		{TurnEnd{Seq: 2, Exit: 124, Reason: "timeout"}, notice(fallbackNotices.TurnFailed) + "retry"},
+		{TurnEnd{Seq: 2, Exit: -1, Reason: "lost"}, notice(fallbackNotices.TurnFailed) + "retry"},
+		{TurnEnd{Seq: 2, Exit: 127, Reason: "start_failed"}, notice(fallbackNotices.TurnFailed) + "retry"},
+		{TurnEnd{Seq: 2, Exit: 130, Reason: "interrupted"}, notice(fallbackNotices.Interrupted) + "retry"},
+		{TurnEnd{Seq: 2, Exit: 0}, "retry"},
+	} {
+		g := &fakeGuest{lastTurn: 2, claimEnd: &c.end}
+		g.write(`{"type":"spawn","event":"turn_start","seq":2}`, textLine,
+			fmt.Sprintf(`{"type":"spawn","event":"turn_end","seq":2,"exit":%d,"reason":%q}`, c.end.Exit, c.end.Reason))
+		_, _, journal := g.snapshot()
+		s := newSession()
+		s.Status, s.RuntimeCursor = "waiting", int64(len(journal))
+		q := &fakeQueue{session: s, delivered: 2, messages: []Message{{Seq: 2, Text: "first"}, {Seq: 5, Text: "retry"}}}
+		g.onDeliver = func(g *fakeGuest, seq int64) { g.endTurn("", 0) }
+		if err := runOne(t, testRunner(q, &fakeRuntime{guest: g})); err != nil {
+			t.Fatal(err)
+		}
+		deliveries, _, _ := g.snapshot()
+		if len(deliveries) != 1 || deliveries[0] != (delivery{5, c.want}) {
+			t.Errorf("%+v: deliveries = %q", c.end, deliveries)
+		}
+	}
+}
+
+func TestTurnNotice(t *testing.T) {
+	failed := &TurnEnd{Seq: 3, Exit: 1}
+	cases := []struct {
+		notices Notices
+		resumed bool
+		end     *TurnEnd
+		want    string
+		names   string
+	}{
+		{testInstructions.Notices, false, nil, "", "[]"},
+		{testInstructions.Notices, false, &TurnEnd{Seq: 3}, "", "[]"},
+		{testInstructions.Notices, true, &TurnEnd{Seq: 3}, notice("R!"), "[resumed]"},
+		{testInstructions.Notices, true, failed, notice("R!", "F!"), "[resumed turn_failed]"},
+		{testInstructions.Notices, false, &TurnEnd{Seq: 3, Exit: 143, Reason: "interrupted"}, notice("I!"), "[interrupted]"},
+		// The platform may leave a notice out: no block for it.
+		{Notices{Resumed: "R!"}, false, failed, "", "[]"},
+		{Notices{Resumed: "  ", TurnFailed: "F!"}, true, failed, notice("F!"), "[turn_failed]"},
+	}
+	for i, c := range cases {
+		got, names := turnNotice(c.notices, c.resumed, c.end)
+		if got != c.want || fmt.Sprint(names) != c.names {
+			t.Errorf("case %d: %q %v, want %q %s", i, got, names, c.want, c.names)
+		}
 	}
 }
 

@@ -112,6 +112,81 @@ func TestHTTPQueueClaim(t *testing.T) {
 	}
 }
 
+// The claim carries the platform's instructions; invalid ones fall back to
+// the runner's own without failing the claim.
+func TestHTTPQueueClaimInstructions(t *testing.T) {
+	instructions := ""
+	q, _ := newPlatform(t, func(string, map[string]any) (int, string) {
+		return 200, `{"session":{"id":"` + sessionID + `","status":"queued","leaseToken":"` + leaseToken + `"` + instructions + `}}`
+	})
+	claim := func(field string) *Session {
+		t.Helper()
+		instructions = field
+		s, err := q.Claim(context.Background(), "cp-0", time.Minute)
+		if err != nil || s == nil {
+			t.Fatalf("claim with %q = %+v, %v", field, s, err)
+		}
+		return s
+	}
+	s := claim(`,"instructions":{"version":"2026-10-17.1","system":"Rules.\n","notices":{"resumed":"R","interrupted":"I","turn_failed":"F"},"extra":1}`)
+	want := Instructions{Version: "2026-10-17.1", System: "Rules.\n", Notices: Notices{Resumed: "R", Interrupted: "I", TurnFailed: "F"}}
+	if s.Instructions == nil || *s.Instructions != want || s.instructionsVersion() != "2026-10-17.1" {
+		t.Fatalf("instructions = %+v", s.Instructions)
+	}
+	if s := claim(``); s.Instructions != nil || s.instructionsVersion() != fallbackVersion {
+		t.Fatalf("absent instructions = %+v", s.Instructions)
+	}
+	if s := claim(`,"instructions":{"version":"v","system":7}`); s.Instructions != nil || s.ID != sessionID {
+		t.Fatalf("invalid instructions = %+v", s.Instructions)
+	}
+}
+
+func TestParseInstructions(t *testing.T) {
+	systemJSON := func(n int) string { return `"` + strings.Repeat("s", n) + `"` }
+	noticeJSON := func(n int) string { return `"` + strings.Repeat("n", n) + `"` }
+	valid := map[string]Instructions{
+		`{"version":"v1","system":"S"}`:                                              {Version: "v1", System: "S"},
+		`{"version":"v1","system":"S","notices":null}`:                               {Version: "v1", System: "S"},
+		`{"version":"v1","system":"S","notices":{}}`:                                 {Version: "v1", System: "S"},
+		`{"version":"v1","system":"S","notices":{"resumed":null,"turn_failed":"F"}}`: {Version: "v1", System: "S", Notices: Notices{TurnFailed: "F"}},
+		`{"version":"v1","system":` + systemJSON(16<<10) + `,"notices":{"interrupted":` + noticeJSON(2<<10) + `}}`: {
+			Version: "v1", System: strings.Repeat("s", 16<<10), Notices: Notices{Interrupted: strings.Repeat("n", 2<<10)}},
+	}
+	for raw, want := range valid {
+		got, err := parseInstructions(json.RawMessage(raw))
+		if err != nil || got == nil || *got != want {
+			t.Errorf("%.80s: %+v, %v", raw, got, err)
+		}
+	}
+	for _, raw := range []string{"", "null", " null "} {
+		if got, err := parseInstructions(json.RawMessage(raw)); got != nil || err != nil {
+			t.Errorf("absent %q: %+v, %v", raw, got, err)
+		}
+	}
+	for name, raw := range map[string]string{
+		"oversized system":      `{"version":"v1","system":` + systemJSON(16<<10+1) + `}`,
+		"oversized notice":      `{"version":"v1","system":"S","notices":{"resumed":` + noticeJSON(2<<10+1) + `}}`,
+		"oversized version":     `{"version":` + systemJSON(101) + `,"system":"S"}`,
+		"not an object":         `"rules"`,
+		"an array":              `[{"version":"v1","system":"S"}]`,
+		"system not a string":   `{"version":"v1","system":["S"]}`,
+		"system a number":       `{"version":"v1","system":7}`,
+		"version not a string":  `{"version":1,"system":"S"}`,
+		"notices not an object": `{"version":"v1","system":"S","notices":["R"]}`,
+		"notice not a string":   `{"version":"v1","system":"S","notices":{"resumed":true}}`,
+		"missing system":        `{"version":"v1"}`,
+		"blank system":          `{"version":"v1","system":" \n"}`,
+		"missing version":       `{"system":"S"}`,
+		"null version":          `{"version":null,"system":"S"}`,
+		"NUL in system":         `{"version":"v1","system":"a\u0000b"}`,
+		"broken JSON":           `{"version":"v1","system":"S"`,
+	} {
+		if got, err := parseInstructions(json.RawMessage(raw)); got != nil || err == nil {
+			t.Errorf("%s: accepted (%+v)", name, got)
+		}
+	}
+}
+
 func TestHTTPQueueRefusesAClaimWithoutAValidLease(t *testing.T) {
 	q, _ := newPlatform(t, func(string, map[string]any) (int, string) {
 		return 200, `{"session":{"id":"` + sessionID + `","leaseToken":"worker-1"}}`

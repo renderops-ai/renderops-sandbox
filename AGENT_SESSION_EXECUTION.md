@@ -26,12 +26,59 @@ platform (queue, Postgres)  <-- /api/internal/agent-sessions/* -->  runner (agen
 
 ## Platform API (Bearer `AGENT_WORKER_TOKEN`, JSON bodies)
 
-`claim {workerId, leaseSeconds}` -> 204 or `{session}` with a UUID `leaseToken`;
-every other call carries it and gets 409 once the lease is lost or expired.
+`claim {workerId, leaseSeconds}` -> 204 or `{session}` with a UUID `leaseToken` and the agent's
+`instructions` (see below); every other call carries the lease token and gets 409 once the lease is
+lost or expired.
 `[id]/heartbeat {leaseToken, leaseSeconds}`, `[id]/events {leaseToken, cursorFrom?, cursorTo?, events}`
 (cursor CAS on `runtime_cursor`; 409 `{runtimeCursor}` on mismatch), `[id]/inbox`, `[id]/inbox/ack {seq}`
 (also clears the interrupt flag), `[id]/release {idle}` (409 `{pending}` while messages wait),
 `[id]/workspace-grant` -> `{repository, headSha, baseSha, token, expiresAt}`.
+
+## Agent instructions (rendered by the platform)
+
+The platform renders the agent's instructions; the runner only validates them and writes them into
+the sandbox. The claim's `session.instructions`:
+
+```json
+{
+  "version": "2026-10-17.1",
+  "system": "appended to Claude Code's system prompt, <= 16 KB",
+  "notices": { "resumed": "<= 2 KB", "interrupted": "<= 2 KB", "turn_failed": "<= 2 KB" }
+}
+```
+
+- **Validation** (`instructions.go`): an object; `version` (<= 100 bytes) and `system` are non-empty
+  strings; `notices` and each notice are optional (absent or `null`), otherwise strings; no NUL. Unknown
+  keys are ignored. Absent or `null` `instructions` (an older platform) and invalid ones both use the
+  runner's fallback: a few generic sentences (isolated sandbox, repo at `/workspace/repo`, commit on
+  `spawn/<sid8>`, no credentials) and short generic notices. Invalid ones are logged; the claim log's
+  `instructions_version` names the version in use (`fallback` for the runner's own).
+- **System prompt**: `system` is written to `system.txt` on every claim and passed with
+  `--append-system-prompt-file`. Claude Code records the system prompt on a conversation's first request
+  and reuses it on `--resume` until compaction, so a changed text reaches new sessions only. GitHub-authored
+  text (issue and PR titles, bodies, comments) never goes in it.
+- **Turn notices**: before a follow-up turn, the runner puts one block at the top of that turn's prompt
+  file (still written base64):
+
+  ```
+  <spawn_notice>
+  <resumed text>
+  <interrupted or turn_failed text>
+  </spawn_notice>
+
+  <the user's messages>
+  ```
+
+  `resumed`: the sandbox was resumed since the previous turn was delivered. `interrupted`: the previous
+  turn's `turn_end` reason is `interrupted` (the user's Stop). `turn_failed`: it ended any other way than a
+  clean exit (`timeout`, `lost`, `start_failed`, or a non-zero exit: Claude Code exits 1 on an API error and
+  at its step limit). Each event is noticed once, on the next delivered turn; the first turn gets none; an
+  empty notice text is left out, and with nothing to notice there is no block. Each notice is written as
+  sent, one after another (the platform decides any bullets). The previous turn's end comes from the decoded
+  journal or, when it is behind the committed cursor, from the setup script, which reports the journal's
+  last `turn_end` marker.
+- **Review file**: setup creates `/var/tmp/spawn/review/` (root, 0755); the agent writes `review.json`
+  there and the platform reads it with exec. The runner does nothing else with it.
 
 ## Runner (`backend/internal/agentsession`)
 
@@ -63,15 +110,29 @@ A failed or timed-out *turn* is not final: it ends with a system message and the
 
 Every script runs as `printf %s <base64> | base64 -d | sh` (body in a function with stdin from
 `/dev/null`). `/var/lib/spawn/agent/<sid>/` (0700): `env` (0600: model proxy env, `HOME=/root`,
-`TMPDIR=GOTMPDIR=/var/tmp/spawn`, `GOTOOLCHAIN=auto`), `system.txt`, `turn.sh`, `prompts/<seq>.txt`,
-`turns/<seq>/` (mkdir = start lock), `events.jsonl` (journal), `stderr.log`, `turn.pgid`,
-`workspace.ok`, `ports.published`.
+`TMPDIR=GOTMPDIR=/var/tmp/spawn`, `GOTOOLCHAIN=auto`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`),
+`system.txt` (0600), `settings.json` (0600), `turn.sh`, `prompts/<seq>.txt`, `turns/<seq>/` (mkdir =
+start lock), `events.jsonl` (journal), `stderr.log`, `turn.pgid`, `workspace.ok`, `ports.published`.
+`/var/tmp/spawn/review/` (0755) is the agent's review directory.
 
 Turn wrapper (`setsid`, detached): `turn.pgid`, `turn_start` marker, then in `/workspace/repo`
 `timeout <45m> claude -p "<prompt>" --output-format stream-json --verbose (--session-id|--resume) <sid>
---permission-mode auto --max-turns 200 --append-system-prompt "<system.txt>" </dev/null >>events.jsonl`,
-then a `turn_end {exit, reason}` marker (`interrupted`, `timeout`). `--resume` once
-`$HOME/.claude/projects/*/<sid>.jsonl` exists.
+--permission-mode auto --permission-prompts none --max-turns 200 --append-system-prompt-file <system.txt>
+--settings <settings.json> </dev/null >>events.jsonl`, then a `turn_end {exit, reason}` marker
+(`interrupted`, `timeout`). `--resume` once `$HOME/.claude/projects/*/<sid>.jsonl` exists.
+
+Claude Code settings, each checked against Claude Code 2.1.296 (the agents image's version):
+
+- `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`: Claude Code ignores provider, auth and proxy keys
+  (`ANTHROPIC_BASE_URL`, tokens, `HTTPS_PROXY`, CA settings) in settings files. Without it, a repository's
+  `.claude/settings.json` `env` block redirects the model traffic, and `-p` applies project settings
+  without a trust prompt.
+- `--settings settings.json` sets `pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles`
+  to `claude-md-and-agents-md`: AGENTS.md loads beside CLAUDE.md (by default only where there is no
+  CLAUDE.md). Claude Code reads plugin options from user and `--settings` (flag) settings only, so a
+  repository cannot turn it off.
+- `--permission-prompts none`: anything that would prompt (an MCP elicitation included) is denied
+  locally instead of waiting for a host. `AskUserQuestion` is not offered in this `-p` invocation either way.
 
 Poll (args: cursor, ports signature): exit 10 when nothing changed; else size, wrapper alive
 (`/proc/<pid>/stat` not zombie, start time matches), last started turn, listening ports

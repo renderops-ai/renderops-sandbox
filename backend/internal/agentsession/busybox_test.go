@@ -42,8 +42,11 @@ export PATH=/work/bin:$PATH
 mkdir -p /work/repo /work/home
 run() { sh -c "$(cat /work/$1)"; }
 run setup.cmd > /work/setup.out
+stat -c '%a %U' /work/tmp/review > /work/review.out
+stat -c '%a %U' /work/agent/` + testSessionID + `/settings.json > /work/settings.out
 run deliver2.cmd > /work/deliver2.out
 i=0; while ! grep -q '"event":"turn_end","seq":2' /work/agent/*/events.jsonl && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+run setup.cmd > /work/setup2.out
 touch /work/slow
 run deliver3.cmd > /work/deliver3.out
 sleep 1
@@ -81,8 +84,18 @@ echo done > /work/harness.out
 	if read("harness.out") != "done\n" {
 		t.Fatal("harness did not finish")
 	}
-	if report, err := parseSetup(read("setup.out")); err != nil || report.WorkspaceReady || report.Size != 0 {
+	if report, err := parseSetup(read("setup.out")); err != nil || report.WorkspaceReady || report.Size != 0 || report.LastEnd != nil {
 		t.Fatalf("setup = %+v, %v", report, err)
+	}
+	// The agent's review directory: root's, readable by the platform's exec.
+	if got := strings.TrimSpace(read("review.out")); got != "755 root" {
+		t.Fatalf("review dir = %q", got)
+	}
+	if got := strings.TrimSpace(read("settings.out")); got != "600 root" {
+		t.Fatalf("settings.json = %q", got)
+	}
+	if report, err := parseSetup(read("setup2.out")); err != nil || report.LastEnd == nil || *report.LastEnd != (TurnEnd{Seq: 2}) {
+		t.Fatalf("setup after a turn = %+v, %v", report, err)
 	}
 	if strings.TrimSpace(read("deliver2.out")) != "started" || strings.TrimSpace(read("deliver3.out")) != "started" {
 		t.Fatalf("deliver = %q %q", read("deliver2.out"), read("deliver3.out"))
@@ -90,6 +103,11 @@ echo done > /work/harness.out
 	args := strings.Split(strings.TrimSpace(read("claude-args")), "\n")
 	if len(args) != 2 || !strings.Contains(args[0], "--session-id "+testSessionID) || !strings.Contains(args[1], "--resume "+testSessionID) {
 		t.Fatalf("claude args = %q", args)
+	}
+	for _, want := range []string{"--permission-prompts none", "--append-system-prompt-file " + p.Base + "/system.txt", "--settings " + p.Base + "/settings.json"} {
+		if !strings.Contains(args[0], want) {
+			t.Fatalf("claude args %q lack %q", args[0], want)
+		}
 	}
 	running, err := parsePoll(read("poll-running.out"))
 	if err != nil || !running.Alive || running.LastTurn != 3 {

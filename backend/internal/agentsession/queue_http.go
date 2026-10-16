@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -89,6 +90,9 @@ type wireSession struct {
 	DeliveredSeq       flexInt  `json:"deliveredSeq"`
 	LeaseToken         string   `json:"leaseToken"`
 	LeaseExpiresAt     flexTime `json:"leaseExpiresAt"`
+	// Instructions is validated separately (parseInstructions): a malformed
+	// value falls back to the runner's own instructions, not a failed claim.
+	Instructions json.RawMessage `json:"instructions"`
 }
 
 // Claim asks for the next session that needs a runner; nil when there is none.
@@ -110,6 +114,12 @@ func (q *HTTPQueue) Claim(ctx context.Context, workerID string, lease time.Durat
 	if _, err := uuid.Parse(w.LeaseToken); err != nil {
 		return nil, errors.New("claimed session has no valid lease token")
 	}
+	instructions, err := parseInstructions(w.Instructions)
+	if err != nil {
+		slog.Warn("claimed session has invalid agent instructions; using the runner's fallback",
+			"component", "agentsession", "session_id", w.ID, "err", err)
+		instructions = nil
+	}
 	return &Session{
 		ID:                 w.ID,
 		OwnerUserID:        w.OwnerUserID,
@@ -126,6 +136,7 @@ func (q *HTTPQueue) Claim(ctx context.Context, workerID string, lease time.Durat
 		DeliveredSeq:       int64(w.DeliveredSeq),
 		LeaseToken:         w.LeaseToken,
 		LeaseExpiresAt:     time.Time(w.LeaseExpiresAt),
+		Instructions:       instructions,
 	}, nil
 }
 

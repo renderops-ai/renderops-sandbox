@@ -42,6 +42,9 @@ type Session struct {
 	DeliveredSeq       int64
 	LeaseToken         string
 	LeaseExpiresAt     time.Time
+	// Instructions are the platform's agent instructions; nil means the
+	// runner's generic fallback (an older platform, or invalid ones).
+	Instructions *Instructions
 }
 
 // Lease identifies the claim on a session. Never log the token.
@@ -141,6 +144,10 @@ type PollResult struct {
 	// Previous (first poll of a claim only): the ports an earlier claim
 	// published as open.
 	Previous []Port
+	// LastTurnEnd (first poll of a claim only): the last turn_end in the
+	// journal when the session was claimed, which may precede the committed
+	// cursor; nil when no turn has ended.
+	LastTurnEnd *TurnEnd
 }
 
 // Port is a listening TCP socket in the guest.
@@ -260,7 +267,8 @@ func (r *Runner) RunOne(ctx context.Context) (bool, error) {
 	}
 	log := slog.With("component", "agentsession", "session_id", s.ID, "worker_id", r.WorkerID)
 	log.Info("claimed agent session", "status", s.Status, "sandbox_id", s.SandboxID,
-		"cancel_requested", s.CancelRequested, "runtime_cursor", s.RuntimeCursor)
+		"cancel_requested", s.CancelRequested, "runtime_cursor", s.RuntimeCursor,
+		"instructions_version", clean(s.instructionsVersion(), maxVersionBytes))
 
 	ctl := &control{}
 	ctl.set(Heartbeat{CancelRequested: s.CancelRequested, InterruptRequested: s.InterruptRequested}, claimedAt)
@@ -344,6 +352,11 @@ type tracker struct {
 	ports      map[int]string
 	baselined  bool
 	resetPorts bool
+	// For the next turn's notices: the sandbox was resumed since the last
+	// turn was delivered, and how the last finished turn ended (nil once a
+	// delivered turn carried it).
+	resumedSinceTurn bool
+	lastEnd          *TurnEnd
 
 	aliveSince     time.Time
 	stopRequested  bool
@@ -499,7 +512,13 @@ func (r *Runner) idle(ctx context.Context, s *Session, guest Guest, t *tracker, 
 	}
 
 	seq, prompt := combine(fresh)
-	if err := guest.Deliver(ctx, seq, prompt); err != nil {
+	// Notices are about the previous turn, so the first turn gets none.
+	var notice string
+	var notices []string
+	if t.lastTurn > 0 {
+		notice, notices = turnNotice(s.notices(), t.resumedSinceTurn, t.lastEnd)
+	}
+	if err := guest.Deliver(ctx, seq, notice+prompt); err != nil {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
@@ -510,11 +529,13 @@ func (r *Runner) idle(ctx context.Context, s *Session, guest Guest, t *tracker, 
 		return false, fmt.Errorf("deliver turn %d: %w", seq, err)
 	}
 	t.deliverFailure = 0
+	// The prompt file is written: these events are never noticed again.
+	t.resumedSinceTurn, t.lastEnd = false, nil
 	if err := r.Queue.Ack(ctx, lease, seq); err != nil {
 		// The turn runs; a later claim acks it from the guest's turn record.
 		return false, err
 	}
-	log.Info("started agent turn", "seq", seq, "messages", len(fresh))
+	log.Info("started agent turn", "seq", seq, "messages", len(fresh), "notices", notices)
 	t.lastAck = time.Now()
 	t.lastTurn = max(t.lastTurn, seq)
 	t.alive = true
@@ -588,12 +609,21 @@ func (r *Runner) absorb(ctx context.Context, s *Session, guest Guest, t *tracker
 	}
 	if res.Resumed {
 		t.resetPorts = true
+		t.resumedSinceTurn = true
+	}
+	// The claim-time turn end first: turn ends decoded below are later.
+	if res.LastTurnEnd != nil {
+		end := *res.LastTurnEnd
+		t.lastEnd = &end
 	}
 	if len(res.Data) > 0 {
 		if _, err := t.decoder.Feed(res.From, res.Data, res.Full); err != nil {
 			return fmt.Errorf("%w: %w", errJournalLost, err)
 		}
 		t.more = res.Full
+		if end, ok := t.decoder.TakeTurnEnd(); ok {
+			t.lastEnd = &end
+		}
 	}
 	if err := r.publishPorts(ctx, s, guest, t, res, log); err != nil {
 		return err

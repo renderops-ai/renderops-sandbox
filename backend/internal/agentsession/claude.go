@@ -62,6 +62,8 @@ type Decoder struct {
 	// resultSeen: the current turn's result line was decoded, so a non-zero
 	// wrapper exit needs no message of its own.
 	resultSeen bool
+	// turnEnd is the last turn_end marker decoded and not yet taken.
+	turnEnd *TurnEnd
 }
 
 type entry struct {
@@ -142,6 +144,17 @@ func (d *Decoder) Take() []Released {
 		out = append(out, r)
 	}
 	return out
+}
+
+// TakeTurnEnd returns the last turn_end marker decoded since the previous
+// call, if any.
+func (d *Decoder) TakeTurnEnd() (TurnEnd, bool) {
+	if d.turnEnd == nil {
+		return TurnEnd{}, false
+	}
+	end := *d.turnEnd
+	d.turnEnd = nil
+	return end, true
 }
 
 // Flush resolves tool calls that never got a result (the turn ended or was
@@ -283,6 +296,7 @@ func (d *Decoder) marker(e *entry, l streamLine) {
 		if l.Exit != nil {
 			exit = *l.Exit
 		}
+		d.turnEnd = &TurnEnd{Seq: l.Seq, Exit: exit, Reason: l.Reason}
 		switch {
 		case l.Reason == "interrupted":
 			d.add(e, systemMessage("Stopped."))

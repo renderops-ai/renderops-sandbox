@@ -243,7 +243,7 @@ func (rt *SandboxRuntime) Ensure(ctx context.Context, s *Session, emit EmitFunc)
 		return nil, err
 	}
 
-	system := systemPrompt(s, branchName(s.ID), rt.PreviewDomain)
+	system := systemPrompt(s, branchName(s.ID))
 	turn := turnScript(g.paths, s.ID, orDefault(rt.TurnTimeout, defaultTurnTimeout))
 	out, err := g.exec(ctx, setupScript(g.paths, envFile(g.env), system, turn), setupTimeoutS)
 	if err != nil {
@@ -257,6 +257,7 @@ func (rt *SandboxRuntime) Ensure(ctx context.Context, s *Session, emit EmitFunc)
 		return nil, fmt.Errorf("%w: journal has %d bytes, the platform committed %d", errJournalLost, report.Size, s.RuntimeCursor)
 	}
 	g.previous = report.Published
+	g.lastEnd = report.LastEnd
 	if !report.WorkspaceReady {
 		if err := g.prepareWorkspace(ctx, emit); err != nil {
 			return nil, err
@@ -308,9 +309,11 @@ type sandboxGuest struct {
 	// resumed: the sandbox was resumed since the last poll, so servers
 	// started before the pause may be gone (the next poll says so).
 	resumed bool
-	// previous: ports published as open by an earlier claim, handed to the
-	// first poll.
+	// previous: ports published as open by an earlier claim, and lastEnd:
+	// the journal's last turn_end at claim time, both handed to the first
+	// poll.
 	previous     []Port
+	lastEnd      *TurnEnd
 	previousSent bool
 }
 
@@ -441,6 +444,7 @@ func (g *sandboxGuest) Poll(ctx context.Context, cursor int64, portsSig string) 
 	out.Resumed, g.resumed = resumed, false
 	if !g.previousSent {
 		out.Previous, g.previousSent = append([]Port{}, g.previous...), true
+		out.LastTurnEnd = g.lastEnd
 	}
 	g.mu.Unlock()
 	if out.Size < cursor {

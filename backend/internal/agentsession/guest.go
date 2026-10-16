@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +18,8 @@ import (
 //
 //	/var/lib/spawn/agent/<sid>/   0700, root
 //	  env            0600  model-access env + TMPDIR/GOTMPDIR/GOTOOLCHAIN
-//	  system.txt           appended system prompt
+//	  system.txt     0600  appended system prompt (platform text or fallback)
+//	  settings.json  0600  Claude Code --settings (claudeSettings)
 //	  turn.sh        0700  the turn wrapper
 //	  prompts/<seq>.txt    the prompt of the turn for user message <seq>
 //	  turns/<seq>/         mkdir = the turn's start lock; pid, stopped
@@ -26,6 +28,8 @@ import (
 //	  turn.pgid            "<pid> <seq> <starttime>" while a turn runs
 //	  workspace.ok         the checkout is done (HEAD at checkout)
 //	  ports.published      "<port> <bind>" the runner last published as open
+//	/var/tmp/spawn/review/        0755, root: the agent writes review.json
+//	                              here; the platform reads it
 //
 // Every script runs as `printf %s <base64> | base64 -d | sh`: quoting and
 // `exit` never reach the guest's persistent shell. Each script body runs as a
@@ -72,25 +76,39 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-// setupScript writes the session's guest files (idempotent; env is rewritten
-// on every claim so a new grant takes effect at the next turn) and reports
-// whether the workspace is ready and the journal's size.
+// claudeSettings is passed to every turn with --settings. Claude Code reads
+// plugin options only from user and flag settings, so a repository's own
+// settings files cannot change this. It loads each directory's AGENTS.md
+// beside its CLAUDE.md; by default AGENTS.md is read only where a project
+// has no CLAUDE.md.
+const claudeSettings = `{"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md-and-agents-md"}}}}` + "\n"
+
+// setupScript writes the session's guest files (idempotent; env and
+// system.txt are rewritten on every claim, so a new grant takes effect at the
+// next turn), creates the review directory, and reports whether the workspace
+// is ready, the journal's size and its last turn_end marker.
 func setupScript(p guestPaths, env, system, turn string) string {
 	return scriptBody(fmt.Sprintf(`set -e
 umask 077
 base=%s
-mkdir -p "$base/prompts" "$base/turns" %s
+tmp=%s
+mkdir -p "$base/prompts" "$base/turns" "$tmp"
 chmod 700 "$base"
+mkdir -p "$tmp/review"
+chmod 755 "$tmp/review"
 put() { printf %%s "$2" | base64 -d > "$1.tmp"; chmod "$3" "$1.tmp"; mv -f "$1.tmp" "$1"; }
 put "$base/env" %s 600
 put "$base/system.txt" %s 600
+put "$base/settings.json" %s 600
 put "$base/turn.sh" %s 700
 [ -f "$base/events.jsonl" ] || : > "$base/events.jsonl"
 if [ -f "$base/workspace.ok" ] && [ -d %s/.git ]; then echo "workspace ok"; else echo "workspace missing"; fi
 echo "size $(wc -c < "$base/events.jsonl" | tr -d ' ')"
+end=$(grep -F '{"type":"spawn","event":"turn_end",' "$base/events.jsonl" | tail -n 1 | head -c 512)
+if [ -n "$end" ]; then printf 'lastend %%s\n' "$end"; fi
 %s`,
 		shellQuote(p.Base), shellQuote(p.Tmp),
-		b64(env), b64(system), b64(turn),
+		b64(env), b64(system), b64(claudeSettings), b64(turn),
 		shellQuote(p.Repo), printPublished))
 }
 
@@ -142,13 +160,17 @@ func envScript(p guestPaths, env string) string {
 
 // envFile is the turn's environment. The model token in it works only from
 // inside this sandbox (the worker's model proxy), and is never printed.
+// CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST makes Claude Code ignore provider and
+// auth keys (ANTHROPIC_BASE_URL, tokens, proxies) in settings files, so a
+// repository's .claude/settings.json cannot send the model traffic elsewhere.
 func envFile(model map[string]string) string {
 	vars := map[string]string{
-		"HOME":                guestHome,
-		"TMPDIR":              guestTmpDir,
-		"GOTMPDIR":            guestTmpDir,
-		"GOTOOLCHAIN":         "auto",
-		"DISABLE_AUTOUPDATER": "1",
+		"HOME":                                 guestHome,
+		"TMPDIR":                               guestTmpDir,
+		"GOTMPDIR":                             guestTmpDir,
+		"GOTOOLCHAIN":                          "auto",
+		"DISABLE_AUTOUPDATER":                  "1",
+		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
 	}
 	for k, v := range model {
 		vars[k] = v
@@ -169,7 +191,11 @@ func envFile(model map[string]string) string {
 // turn's seq. It records itself in turn.pgid, writes turn_start, runs Claude
 // Code with stdin from /dev/null (claude -p otherwise waits for input) under
 // timeout, then writes turn_end with the exit status. --resume continues the
-// session's conversation once it exists.
+// session's conversation once it exists (Claude Code then reuses the system
+// prompt it recorded on the conversation's first request, so a changed
+// system.txt reaches only new sessions). --permission-prompts none: nobody
+// answers a prompt in a headless turn, so anything that would ask is denied
+// locally.
 func turnScript(p guestPaths, sessionID string, turnTimeout time.Duration) string {
 	return fmt.Sprintf(`#!/bin/sh
 base=%s
@@ -189,7 +215,7 @@ echo "$$" > "$base/turns/$seq/pid"
 . "$base/env"
 if cd "$repo" 2>>"$base/stderr.log"; then
 	if ls "$HOME"/.claude/projects/*/"$sid.jsonl" >/dev/null 2>&1; then mode=--resume; else mode=--session-id; fi
-	timeout "$turn_s" claude -p "$(cat "$base/prompts/$seq.txt")" --output-format stream-json --verbose "$mode" "$sid" --permission-mode auto --max-turns %d --append-system-prompt "$(cat "$base/system.txt")" </dev/null >>"$ev" 2>>"$base/stderr.log"
+	timeout "$turn_s" claude -p "$(cat "$base/prompts/$seq.txt")" --output-format stream-json --verbose "$mode" "$sid" --permission-mode auto --permission-prompts none --max-turns %d --append-system-prompt-file "$base/system.txt" --settings "$base/settings.json" </dev/null >>"$ev" 2>>"$base/stderr.log"
 	code=$?
 else
 	code=126
@@ -330,42 +356,14 @@ func b64(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
-// systemPrompt is appended to Claude Code's system prompt for every turn.
-func systemPrompt(s *Session, branch, previewDomain string) string {
-	var b strings.Builder
-	b.WriteString("You are a coding agent working inside a Spawn sandbox: an isolated Firecracker microVM (Alpine Linux, 2 vCPU, 4 GB RAM) created for this session only.\n\n")
-	b.WriteString("Workspace\n")
-	fmt.Fprintf(&b, "- The repository is checked out at %s on branch %s.\n", defaultRepoDir, branch)
-	switch s.SourceKind {
-	case "issue":
-		fmt.Fprintf(&b, "- You are working on GitHub issue #%d: %s\n", s.SourceNumber, oneLine(s.Title))
-	case "pull_request":
-		fmt.Fprintf(&b, "- This session is about pull request #%d: %s. The checkout is the pull request's head; its diff against the base is in /review/pr.diff and /review/changed-files.txt lists the changed files.\n", s.SourceNumber, oneLine(s.Title))
-	}
-	b.WriteString("- You may edit files, run commands and install tools (apk add, npm, pip, go). You run as root.\n")
-	fmt.Fprintf(&b, "- /tmp is a small 64 MB tmpfs. TMPDIR and GOTMPDIR point to %s; keep large temporary files on disk. GOTOOLCHAIN=auto lets go download the toolchain go.mod asks for.\n\n", guestTmpDir)
-	b.WriteString("Limits\n")
-	fmt.Fprintf(&b, "- There are no GitHub credentials and you cannot push. When the work is done, commit it on the current branch (%s) with a clear message. Stay on that branch: don't create, switch to or rebase onto other branches.\n", branch)
-	fmt.Fprintf(&b, "- The user publishes your commits on %s with the Create PR button on the session page, which opens the pull request. Don't give them git push, gh or other manual publishing steps.\n", branch)
-	b.WriteString("- No secrets are available to you. Never print environment variables or the files under /var/lib/spawn.\n")
-	fmt.Fprintf(&b, "- Port %d is reserved for the user's VS Code. Never use it or stop what listens on it.\n\n", idePort)
-	b.WriteString("Servers and previews\n")
-	b.WriteString("- Start long-running servers detached so they outlive your command: setsid nohup <command> > /var/log/<name>.log 2>&1 &\n")
-	fmt.Fprintf(&b, "- Listen on 0.0.0.0, not localhost, so the user's Preview tab can reach them. For Vite set server.host: true and server.allowedHosts: ['.%s'].\n\n", previewDomain)
-	b.WriteString("Working style\n")
-	b.WriteString("- Keep changes focused on the task. Run the relevant tests or checks before you finish and report exactly what you ran and the results.\n")
-	return b.String()
-}
-
-func oneLine(s string) string {
-	return clean(strings.Join(strings.Fields(s), " "), 300)
-}
-
 // setupReport is the setup script's answer.
 type setupReport struct {
 	WorkspaceReady bool
 	Size           int64
 	Published      []Port
+	// LastEnd is the journal's last turn_end marker; nil when none (or an
+	// unreadable one: it only selects turn notices).
+	LastEnd *TurnEnd
 }
 
 func parseSetup(stdout string) (setupReport, error) {
@@ -383,6 +381,10 @@ func parseSetup(stdout string) (setupReport, error) {
 				return r, fmt.Errorf("setup reported a bad journal size %q", line)
 			}
 			r.Size, sawSize = n, true
+		case strings.HasPrefix(line, "lastend "):
+			if end, ok := parseTurnEnd(strings.TrimPrefix(line, "lastend ")); ok {
+				r.LastEnd = &end
+			}
 		}
 	}
 	if !sawWorkspace || !sawSize {
@@ -390,6 +392,26 @@ func parseSetup(stdout string) (setupReport, error) {
 	}
 	r.Published = parsePublished(stdout)
 	return r, nil
+}
+
+// parseTurnEnd reads a turn_end marker line as the turn wrapper, poll and
+// stop scripts write it; ok is false for anything else.
+func parseTurnEnd(line string) (TurnEnd, bool) {
+	var m struct {
+		Type   string `json:"type"`
+		Event  string `json:"event"`
+		Seq    int64  `json:"seq"`
+		Exit   *int   `json:"exit"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(line), &m); err != nil || m.Type != "spawn" || m.Event != "turn_end" {
+		return TurnEnd{}, false
+	}
+	end := TurnEnd{Seq: m.Seq, Reason: m.Reason}
+	if m.Exit != nil {
+		end.Exit = *m.Exit
+	}
+	return end, true
 }
 
 // parsePoll reads the poll script's report.

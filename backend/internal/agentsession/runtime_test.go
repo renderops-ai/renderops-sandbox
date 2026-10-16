@@ -550,6 +550,51 @@ func TestPollReportsResumeAndEarlierPorts(t *testing.T) {
 	}
 }
 
+// Ensure writes the platform's system text (or the fallback) to system.txt,
+// and the first poll carries the journal's last turn_end from setup.
+func TestEnsureWritesTheInstructionsAndReportsTheLastTurnEnd(t *testing.T) {
+	env := newRuntime(t)
+	s := newSession()
+	s.Status, s.Instructions = "running", testInstructions
+	env.sandboxes.exec = func(script string) plane.ExecResult {
+		switch scriptKind(script) {
+		case "setup":
+			return plane.ExecResult{Stdout: "workspace ok\nsize 0\nlastend " + `{"type":"spawn","event":"turn_end","seq":4,"exit":124,"reason":"timeout"}` + "\n"}
+		case "poll":
+			return plane.ExecResult{Stdout: "spawn-poll 1\nsize 0\nalive 0\nturn 4\nsig 7\n"}
+		}
+		return plane.ExecResult{}
+	}
+	guest, err := env.rt.Ensure(context.Background(), s, env.emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup := env.sandboxes.scripts[0]
+	if !strings.Contains(setup, `put "$base/system.txt" `+b64("Rules.")+" 600") ||
+		!strings.Contains(setup, `put "$base/settings.json" `+b64(claudeSettings)+" 600") {
+		t.Fatalf("setup script does not write the platform instructions and settings:\n%s", setup)
+	}
+	first, err := guest.Poll(context.Background(), 0, "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.LastTurnEnd == nil || *first.LastTurnEnd != (TurnEnd{Seq: 4, Exit: 124, Reason: "timeout"}) {
+		t.Fatalf("first poll last turn end = %+v", first.LastTurnEnd)
+	}
+	if second, err := guest.Poll(context.Background(), 0, "7"); err != nil || second.LastTurnEnd != nil {
+		t.Fatalf("second poll = %+v, %v", second, err)
+	}
+
+	env = newRuntime(t)
+	s = newSession()
+	if _, err := env.rt.Ensure(context.Background(), s, env.emit); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env.sandboxes.scripts[0], b64(fallbackSystemPrompt("spawn/6a1f0c2e"))) {
+		t.Fatal("setup script does not write the fallback system prompt")
+	}
+}
+
 func TestDerivedIdentifiersAreStable(t *testing.T) {
 	a, derived, err := sessionSandboxID(&Session{ID: sessionID})
 	b, _, _ := sessionSandboxID(&Session{ID: sessionID})
