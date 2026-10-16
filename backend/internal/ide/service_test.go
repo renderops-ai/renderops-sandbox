@@ -19,9 +19,31 @@ type fakeRunner struct {
 	err      error
 }
 
-func (f *fakeRunner) Exec(_ context.Context, _ string, command string, _ int) (executor.ExecutionResult, error) {
+// ExecQuiet is the runner's only way to run a command, so every IDE command
+// these tests see ran quietly.
+func (f *fakeRunner) ExecQuiet(_ context.Context, _ string, command string, _ int) (executor.ExecutionResult, error) {
 	f.commands = append(f.commands, command)
 	return f.result, f.err
+}
+
+func TestServiceRunsEveryCommandQuietly(t *testing.T) {
+	runner := &fakeRunner{result: executor.ExecutionResult{Stdout: "ready"}}
+	service, err := NewService(runner, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Start(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Status(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Stop(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.commands) != 3 {
+		t.Fatalf("quiet commands = %d, want start, status and stop", len(runner.commands))
+	}
 }
 
 func TestServiceStartsOpenVSCodeWithoutApplicationAuthentication(t *testing.T) {

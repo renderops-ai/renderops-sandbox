@@ -147,6 +147,7 @@ type fakeWorker struct {
 	exec     plane.ExecResult
 	execErr  error
 	command  string
+	quiet    bool
 	revokes  int
 }
 
@@ -165,6 +166,7 @@ func (f *fakeWorker) RevokeGitAccess(context.Context, string) error {
 
 func (f *fakeWorker) Exec(_ context.Context, _ string, req plane.ExecRequest) (plane.ExecResult, error) {
 	f.command = req.Command
+	f.quiet = req.Quiet
 	return f.exec, f.execErr
 }
 
@@ -181,6 +183,9 @@ func TestPrepareAlwaysRevokesAndMapsFailures(t *testing.T) {
 	}
 	if strings.Contains(ok.command, "ghs_x") {
 		t.Fatal("token leaked into the guest command")
+	}
+	if !ok.quiet {
+		t.Fatal("the checkout must run quietly, out of the sandbox's log stream")
 	}
 
 	unavailable := &fakeWorker{exec: plane.ExecResult{ExitCode: exitCommitUnavailable, Stderr: "not available"}}

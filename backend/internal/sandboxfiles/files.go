@@ -126,8 +126,9 @@ func newError(code string) *Error {
 }
 
 // ExecFunc runs one command in the sandbox's guest shell. Passive commands
-// must not count as sandbox activity.
-type ExecFunc func(ctx context.Context, command string, timeoutS int, passive bool) (plane.ExecResult, error)
+// must not count as sandbox activity; quiet commands' output must stay out of
+// the sandbox's log stream.
+type ExecFunc func(ctx context.Context, command string, timeoutS int, opts plane.ExecOptions) (plane.ExecResult, error)
 
 // guestConfig is the guest locations and listing caps scripts use; tests
 // point the locations at a temporary directory and lower the caps.
@@ -248,8 +249,10 @@ func (c *Client) checkWritePath(p string) error {
 }
 
 // run executes a script and parses its answer. A script error becomes *Error.
+// Every files script is quiet: its output is file contents and listings, which
+// must not be copied into the sandbox's log stream.
 func (c *Client) run(ctx context.Context, op, script string, timeoutS int, passive bool) (*output, error) {
-	res, err := c.exec(ctx, shellCommand(script), timeoutS, passive)
+	res, err := c.exec(ctx, shellCommand(script), timeoutS, plane.ExecOptions{Passive: passive, Quiet: true})
 	if err != nil {
 		return nil, fmt.Errorf("files %s: %w", op, err)
 	}

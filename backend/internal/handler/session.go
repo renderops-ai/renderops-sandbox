@@ -19,6 +19,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// quietExecer runs a command whose output stays out of the sandbox's log
+// stream (controlplane.Service), for POST /session/:id/exec with quiet set.
+type quietExecer interface {
+	ExecQuiet(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error)
+}
+
 // SessionHandler routes all /session and /session/:id/* requests
 //
 //	POST   /session          → create session
@@ -343,13 +349,30 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			execTimeoutSec := int(resolveDuration(&req.Timeout, auth.Config.DefaultExecTimeout, auth.Config.MaxExecTimeout).Seconds())
 
 			start := time.Now()
-			result, err := mgr.Exec(r.Context(), sessionID, req.Command, execTimeoutSec)
+			var result plane.ExecResult
+			var err error
+			if req.Quiet {
+				quiet, ok := mgr.(quietExecer)
+				if !ok {
+					http.Error(w, "quiet exec is not supported", http.StatusNotImplemented)
+					return
+				}
+				result, err = quiet.ExecQuiet(r.Context(), sessionID, req.Command, execTimeoutSec)
+			} else {
+				result, err = mgr.Exec(r.Context(), sessionID, req.Command, execTimeoutSec)
+			}
 			if err != nil {
-				slog.Error("session exec failed", "session_id", sessionID, "err", err)
+				slog.Error("session exec failed", "session_id", sessionID, "quiet", req.Quiet, "err", err)
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
 			execDurationMs := time.Since(start).Seconds() * 1000
+			// A quiet command's output is only returned: it is not copied
+			// into usage_logs or sandbox_logs.
+			recordedStdout, recordedStderr := result.Stdout, result.Stderr
+			if req.Quiet {
+				recordedStdout, recordedStderr = "", ""
+			}
 
 			sessSt, _ := mgr.GetSession(r.Context(), sessionID)
 			sessTc := auth.Config
@@ -401,8 +424,8 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				DurationMs:    int(execDurationMs),
 				ExitCode:      int(result.ExitCode),
 				CostUSD:       (execDurationMs / 1000.0) * auth.Billing.ExecutionRateUSDPerSec,
-				Stdout:        truncate(result.Stdout, 64*1024),
-				Stderr:        truncate(result.Stderr, 64*1024),
+				Stdout:        truncate(recordedStdout, 64*1024),
+				Stderr:        truncate(recordedStderr, 64*1024),
 			})
 			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			recordRunOutputAsync(usageLogger, platform.SandboxRun{
@@ -416,7 +439,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Status:     runStatus(int(result.ExitCode), result.TerminationReason),
 				DurationMs: int(execDurationMs),
 				StartedAt:  start.UTC().Format(time.RFC3339Nano),
-			}, result.Stdout, result.Stderr, result.OutputLogsCaptured)
+			}, recordedStdout, recordedStderr, result.OutputLogsCaptured)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(execResp)

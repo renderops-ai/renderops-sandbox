@@ -38,6 +38,7 @@ ACK follows database commit. Stable event UUIDs deduplicate retries and lost ACK
 - Billing metadata and audit events remain. New billing rows no longer duplicate stdout/stderr; old payloads are nulled after 48h.
 - PTY output is captured without a dashboard attachment. PTYs merge stdout/stderr, labelled stdout. Input is not explicitly captured, but echoed commands may appear in output.
 - Shell stdout and direct-process stdout/stderr stream while running. Persistent-shell stderr and Python/Node cells still arrive on completion under the existing execution protocols. File-redirected/background processes outside captured pipes are not intercepted.
+- Quiet execs are not captured: the guest skips the feed for an exec request with `quiet: true`. Platform-internal commands use it (files API, agent-session runtime, workspace checkout, IDE), as does a public `POST /session/{id}/exec` with `"quiet": true`. Guests built before the flag ignore it and capture the output.
 - Capture doesn't update idle TTL. Pause/resume reconnects and replays retained output. This policy does not scrub guest RAM checkpoints, customer files, or backups.
 - Ordinary output logs aren't a lossless compliance recorder or a secret-redaction system. Outages, full buffers or worker disk loss can cause explicit/possible gaps.
 

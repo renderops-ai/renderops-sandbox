@@ -34,8 +34,11 @@ const machineSettings = `{
 }
 `
 
+// CommandRunner runs the IDE's commands in a sandbox (session.Manager). They
+// are platform-internal, so they run quietly: the guest keeps their output
+// (the IDE's log tail, its state) out of the sandbox's log stream.
 type CommandRunner interface {
-	Exec(context.Context, string, string, int) (executor.ExecutionResult, error)
+	ExecQuiet(ctx context.Context, sandboxID, command string, timeoutSec int) (executor.ExecutionResult, error)
 }
 
 type Manager interface {
@@ -77,7 +80,7 @@ func NewService(runner CommandRunner, config Config) (*Service, error) {
 }
 
 func (s *Service) Start(ctx context.Context, sandboxID string) (Instance, error) {
-	result, err := s.runner.Exec(ctx, sandboxID, s.startCommand(), 45)
+	result, err := s.runner.ExecQuiet(ctx, sandboxID, s.startCommand(), 45)
 	if err != nil {
 		return Instance{}, fmt.Errorf("start IDE: %w", err)
 	}
@@ -88,7 +91,7 @@ func (s *Service) Start(ctx context.Context, sandboxID string) (Instance, error)
 }
 
 func (s *Service) Status(ctx context.Context, sandboxID string) (Instance, error) {
-	result, err := s.runner.Exec(ctx, sandboxID, s.statusCommand(), 5)
+	result, err := s.runner.ExecQuiet(ctx, sandboxID, s.statusCommand(), 5)
 	if err != nil {
 		return Instance{}, fmt.Errorf("check IDE status: %w", err)
 	}
@@ -100,7 +103,7 @@ func (s *Service) Status(ctx context.Context, sandboxID string) (Instance, error
 }
 
 func (s *Service) Stop(ctx context.Context, sandboxID string) error {
-	result, err := s.runner.Exec(ctx, sandboxID, s.stopCommand(), 10)
+	result, err := s.runner.ExecQuiet(ctx, sandboxID, s.stopCommand(), 10)
 	if err != nil {
 		return fmt.Errorf("stop IDE: %w", err)
 	}

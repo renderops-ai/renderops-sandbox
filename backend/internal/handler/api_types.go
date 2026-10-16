@@ -69,6 +69,9 @@ type CreateSessionRequest struct {
 type ExecInSessionRequest struct {
 	Command string `json:"command"`
 	Timeout int    `json:"timeout,omitempty"`
+	// Quiet returns the output without copying it into the sandbox's logs or
+	// usage records, for the platform's own reads (Create PR, review).
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 type CreateSessionResponse struct {

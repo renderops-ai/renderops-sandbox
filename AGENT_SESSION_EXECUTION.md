@@ -105,8 +105,9 @@ published set is kept in `ports.published` for the next claim.
 - No push and no PR yet: changes stay committed in the sandbox on `spawn/<sid8>`.
 - The checkout is a blob-less partial clone; after the git grant is revoked, history blobs other than
   the checkout cannot be fetched (`git log -p` of older commits fails).
-- Poll output passes through the guest's exec log capture, so journal chunks also appear in the
-  sandbox's log stream.
+- Runtime commands (setup, polls, deliver, stop, workspace) and the checkout are quiet execs, so
+  journal chunks stay out of the sandbox's log stream. A sandbox started from a guest image that
+  predates quiet execs still logs them.
 - Ports shown while a session waits can be stale after its idle pause until the next turn resets them.
 
 Tests: `cd backend && go test -race ./internal/agentsession ./internal/controlplane/... ./internal/modelaccess`.

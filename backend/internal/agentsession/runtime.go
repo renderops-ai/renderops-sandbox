@@ -42,13 +42,15 @@ const (
 )
 
 // Sandboxes is the part of the control plane the runtime drives
-// (controlplane.Service).
+// (controlplane.Service). Every runtime command (setup, polls, deliver, stop,
+// workspace) is platform-internal and runs quietly: its output (the agent's
+// journal, the user's code) stays out of the sandbox's log stream.
 type Sandboxes interface {
 	CreateWithID(ctx context.Context, spec controlplane.SandboxSpec) (*plane.SessionInfo, error)
 	GetSession(ctx context.Context, id string) (*plane.SessionInfo, bool)
 	Resume(ctx context.Context, id string) error
 	Pause(ctx context.Context, id string) error
-	Exec(ctx context.Context, id, command string, timeoutSec int) (plane.ExecResult, error)
+	ExecQuiet(ctx context.Context, id, command string, timeoutSec int) (plane.ExecResult, error)
 }
 
 // ModelAccess grants a sandbox's agent its owner's model (modelaccess.Granter).
@@ -422,7 +424,7 @@ func (g *sandboxGuest) Poll(ctx context.Context, cursor int64, portsSig string) 
 	if resumed {
 		portsSig = "" // report every port again after a resume
 	}
-	res, err := g.rt.Sandboxes.Exec(ctx, g.sandboxID, shellCommand(pollScript(g.paths, cursor, portsSig)), pollTimeoutS)
+	res, err := g.rt.Sandboxes.ExecQuiet(ctx, g.sandboxID, shellCommand(pollScript(g.paths, cursor, portsSig)), pollTimeoutS)
 	if err != nil {
 		return nil, fmt.Errorf("poll guest: %w", err)
 	}
@@ -501,7 +503,7 @@ func (g *sandboxGuest) Stop(ctx context.Context) error {
 // exec runs a script in the guest and returns its stdout; a non-zero exit is
 // an error carrying the end of its stderr.
 func (g *sandboxGuest) exec(ctx context.Context, script string, timeoutS int) (string, error) {
-	res, err := g.rt.Sandboxes.Exec(ctx, g.sandboxID, shellCommand(script), timeoutS)
+	res, err := g.rt.Sandboxes.ExecQuiet(ctx, g.sandboxID, shellCommand(script), timeoutS)
 	if err != nil {
 		return "", err
 	}

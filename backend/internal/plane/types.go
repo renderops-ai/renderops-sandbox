@@ -109,6 +109,18 @@ type ExecRequest struct {
 	// Passive does not count the command as activity: the sandbox's idle
 	// timer, run count and last exit code are left alone.
 	Passive bool `json:"passive,omitempty"`
+	// Quiet keeps the command's output out of the sandbox's log stream
+	// (sandbox_logs); the output is still returned. For platform-internal
+	// commands such as file reads and writes, agent polls and setup. A guest
+	// agent built before this option ignores it and logs the output as before.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// ExecOptions are the per-command options a caller of the control plane's
+// ExecIfActive picks; see ExecRequest for each.
+type ExecOptions struct {
+	Passive bool
+	Quiet   bool
 }
 
 // ExecResult is the wire form of an execution outcome. Field tags stay in

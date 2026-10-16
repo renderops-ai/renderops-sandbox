@@ -275,11 +275,23 @@ func (s *Service) Execute(ctx context.Context, sessionID, code, language string,
 }
 
 func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error) {
+	return s.exec(ctx, sessionID, plane.ExecRequest{Command: command, TimeoutS: timeoutSec})
+}
+
+// ExecQuiet is Exec for platform-internal commands (agent sessions, the
+// platform's own reads through the public exec API): the guest keeps the
+// command's output out of the sandbox's log stream. The output is still
+// returned.
+func (s *Service) ExecQuiet(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error) {
+	return s.exec(ctx, sessionID, plane.ExecRequest{Command: command, TimeoutS: timeoutSec, Quiet: true})
+}
+
+func (s *Service) exec(ctx context.Context, sessionID string, req plane.ExecRequest) (plane.ExecResult, error) {
 	worker, err := s.worker(ctx, sessionID)
 	if err != nil {
 		return plane.ExecResult{}, err
 	}
-	res, err := worker.Exec(ctx, sessionID, plane.ExecRequest{Command: command, TimeoutS: timeoutSec})
+	res, err := worker.Exec(ctx, sessionID, req)
 	return res, s.reconcile(ctx, sessionID, err)
 }
 
@@ -287,16 +299,17 @@ func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSe
 // Exec it never resumes a paused sandbox: it fails with plane.ErrSandboxNotActive,
 // and the worker does too if the sandbox pauses before the command reaches it.
 // A passive command (the dashboard reading files) does not count as activity,
-// so the sandbox's idle timer is left alone.
-func (s *Service) ExecIfActive(ctx context.Context, sandboxID, command string, timeoutSec int, passive bool) (plane.ExecResult, error) {
+// so the sandbox's idle timer is left alone. A quiet command's output stays
+// out of the sandbox's log stream.
+func (s *Service) ExecIfActive(ctx context.Context, sandboxID, command string, timeoutSec int, opts plane.ExecOptions) (plane.ExecResult, error) {
 	worker := func(endpoint string) workerExecer { return agent.NewClient(endpoint, s.workerToken) }
 	res, err := execIfActive(ctx, s.orchestrator, worker, sandboxID, plane.ExecRequest{
-		Command: command, TimeoutS: timeoutSec, ActiveOnly: true, Passive: passive,
+		Command: command, TimeoutS: timeoutSec, ActiveOnly: true, Passive: opts.Passive, Quiet: opts.Quiet,
 	})
 	if err != nil {
 		return res, err
 	}
-	if !passive {
+	if !opts.Passive {
 		s.db.TouchSandbox(ctx, sandboxID)
 	}
 	return res, nil

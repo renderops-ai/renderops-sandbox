@@ -200,7 +200,9 @@ func Prepare(ctx context.Context, worker Worker, sandboxID string, pin Pin) (Res
 	if err != nil {
 		return Result{}, err
 	}
-	res, err := worker.Exec(ctx, sandboxID, plane.ExecRequest{Command: command, TimeoutS: checkoutTimeoutS})
+	// Quiet: the checkout is platform-internal and its output stays out of
+	// the sandbox's log stream.
+	res, err := worker.Exec(ctx, sandboxID, plane.ExecRequest{Command: command, TimeoutS: checkoutTimeoutS, Quiet: true})
 	if err != nil {
 		return Result{}, fmt.Errorf("run checkout in sandbox %s: %w", sandboxID, err)
 	}
