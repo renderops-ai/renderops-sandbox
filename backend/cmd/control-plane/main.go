@@ -123,6 +123,22 @@ func main() {
 	}
 	modelWorkers := agent.NewModelAccessClient(cfg.WorkerToken)
 
+	// Agent sessions: claim sessions from the platform's queue and run each
+	// one's Claude Code turns in its sandbox (off unless AGENT_RUNNER_ENABLED).
+	runnerCtx, stopRunner := context.WithCancel(context.Background())
+	defer stopRunner()
+	runnerDone := make(chan struct{})
+	if cfg.AgentRunner.Enabled {
+		pool := newAgentPool(cfg, svc, orchestratorClient, modelWorkers, platformClient, secretsKey, billingConfig.Model)
+		go func() {
+			defer close(runnerDone)
+			pool.Run(runnerCtx)
+		}()
+	} else {
+		close(runnerDone)
+		slog.Info("agent session runner disabled (AGENT_RUNNER_ENABLED is not true)")
+	}
+
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
@@ -169,6 +185,14 @@ func main() {
 
 	<-quit
 	slog.Info("shutting down control plane")
+	// Stop claiming agent sessions and stop their heartbeats. Running guest
+	// turns are left alone: their leases expire and the next runner continues.
+	stopRunner()
+	select {
+	case <-runnerDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("agent session runner did not stop in time")
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

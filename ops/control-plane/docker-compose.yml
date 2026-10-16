@@ -44,6 +44,16 @@ services:
       # Decrypts saved model provider credentials for the model relay; same value
       # as the platform's. Unset disables model access for agent sessions.
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+      # Agent-session runner (claims sessions from the platform and runs Claude
+      # Code in their sandboxes). Off unless AGENT_RUNNER_ENABLED=true; then
+      # AGENT_WORKER_TOKEN (the platform's value) and SECRETS_ENCRYPTION_KEY are
+      # required. Empty values use the defaults: PLATFORM_INTERNAL_URL
+      # http://platform:3000, concurrency 4, turn timeout 45m.
+      AGENT_RUNNER_ENABLED: ${AGENT_RUNNER_ENABLED:-}
+      PLATFORM_INTERNAL_URL: ${PLATFORM_INTERNAL_URL:-}
+      AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
+      AGENT_RUNNER_CONCURRENCY: ${AGENT_RUNNER_CONCURRENCY:-}
+      AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +101,11 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Encrypts model provider credentials saved on the Secrets page.
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+      # Agent sessions: off unless "true". The control plane's runner calls
+      # /api/internal/agent-sessions/* with AGENT_WORKER_TOKEN (same value as
+      # the control plane's; unset hides that API).
+      AGENT_SESSIONS_ENABLED: ${AGENT_SESSIONS_ENABLED:-}
+      AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

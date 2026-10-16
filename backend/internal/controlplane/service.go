@@ -7,6 +7,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -93,6 +94,175 @@ func (s *Service) Create(ctx context.Context, userID, billingModel, image string
 		LastUsed:     now,
 		State:        plane.StateActive,
 	}, nil
+}
+
+var (
+	// ErrSandboxIDConflict means the requested sandbox ID belongs to another user.
+	ErrSandboxIDConflict = errors.New("sandbox id is already used by another user")
+	// ErrSandboxGone means the sandbox with the requested ID was destroyed; the
+	// ID cannot be reused.
+	ErrSandboxGone = errors.New("sandbox was destroyed")
+	// ErrSandboxBusy means the sandbox is being provisioned or resumed; retry later.
+	ErrSandboxBusy = errors.New("sandbox is busy")
+)
+
+// SandboxSpec is a sandbox with a caller-chosen ID (see CreateWithID).
+type SandboxSpec struct {
+	ID           string // a UUID
+	UserID       string
+	Name         string
+	BillingModel string
+	Image        string
+	Env          map[string]string
+	VCPUs        int
+	MemoryMB     int
+	DiskGB       int
+	Internet     bool
+	IdleTimeout  time.Duration
+	MaxLifetime  time.Duration
+}
+
+// sandboxRows is the part of the platform database CreateWithID needs.
+type sandboxRows interface {
+	GetSandbox(ctx context.Context, id string) (platform.SandboxRef, bool, error)
+	InsertSandbox(ctx context.Context, sb platform.Sandbox) error
+}
+
+// provisioner is the part of the orchestrator client CreateWithID needs.
+type provisioner interface {
+	Provision(ctx context.Context, request orchestrator.ProvisionRequest) (orchestrator.Placement, error)
+}
+
+// CreateWithID creates a sandbox whose ID the caller chose (the agent-session
+// runner reserves it before provisioning, so a retry never leaks a second VM).
+// It is idempotent: when a row with that ID already exists for the same owner,
+// the existing sandbox is returned (active or paused) or its interrupted
+// provisioning is retried (scheduling or error). A row of another owner, a
+// destroyed row, or one that is provisioning/resuming right now is an error.
+func (s *Service) CreateWithID(ctx context.Context, spec SandboxSpec) (*plane.SessionInfo, error) {
+	return createWithID(ctx, s.db, s.orchestrator, spec)
+}
+
+func createWithID(ctx context.Context, rows sandboxRows, orch provisioner, spec SandboxSpec) (*plane.SessionInfo, error) {
+	id, err := uuid.Parse(spec.ID)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox id %q must be a UUID: %w", spec.ID, err)
+	}
+	// Rows are looked up by id::text, which Postgres renders in lower case.
+	spec.ID = id.String()
+	if strings.TrimSpace(spec.UserID) == "" {
+		return nil, errors.New("sandbox owner is required")
+	}
+	if spec.Image, err = sandboximage.Normalize(spec.Image); err != nil {
+		return nil, err
+	}
+	if spec.Name == "" {
+		spec.Name = "sandbox"
+	}
+
+	ref, found, err := rows.GetSandbox(ctx, spec.ID)
+	if err != nil {
+		return nil, fmt.Errorf("look up sandbox %s: %w", spec.ID, err)
+	}
+	if !found {
+		insertErr := rows.InsertSandbox(ctx, platform.Sandbox{
+			ID:            spec.ID,
+			UserID:        spec.UserID,
+			Image:         spec.Image,
+			Name:          spec.Name,
+			State:         "scheduling",
+			BillingModel:  spec.BillingModel,
+			VCPUs:         spec.VCPUs,
+			MemoryMB:      spec.MemoryMB,
+			DiskGB:        spec.DiskGB,
+			Internet:      spec.Internet,
+			IdleTimeoutMs: int(spec.IdleTimeout.Milliseconds()),
+		})
+		if insertErr == nil {
+			return provisionWithID(ctx, orch, spec)
+		}
+		// A concurrent create of the same ID may have won the insert.
+		ref, found, err = rows.GetSandbox(ctx, spec.ID)
+		if err != nil || !found {
+			return nil, fmt.Errorf("create sandbox scheduling row: %w", insertErr)
+		}
+	}
+
+	if ref.UserID != spec.UserID {
+		return nil, fmt.Errorf("%w: %s", ErrSandboxIDConflict, spec.ID)
+	}
+	switch ref.State {
+	case "active", "paused":
+		return sessionInfoFromRef(ref, spec), nil
+	case "scheduling", "error":
+		// The earlier create stopped before the sandbox was placed (or its
+		// placement failed and was released); placing it again is safe.
+		slog.Info("retrying provisioning of existing sandbox", "sandbox_id", spec.ID, "state", ref.State)
+		return provisionWithID(ctx, orch, spec)
+	case "provisioning", "resuming":
+		return nil, fmt.Errorf("%w: sandbox %s is %s", ErrSandboxBusy, spec.ID, ref.State)
+	default:
+		return nil, fmt.Errorf("%w: sandbox %s is %s", ErrSandboxGone, spec.ID, ref.State)
+	}
+}
+
+func provisionWithID(ctx context.Context, orch provisioner, spec SandboxSpec) (*plane.SessionInfo, error) {
+	if _, err := orch.Provision(ctx, orchestrator.ProvisionRequest{
+		CreateRequest: plane.CreateRequest{
+			SandboxID:    spec.ID,
+			UserID:       spec.UserID,
+			Image:        spec.Image,
+			BillingModel: spec.BillingModel,
+			Env:          spec.Env,
+			VCPUs:        spec.VCPUs,
+			MemoryMB:     spec.MemoryMB,
+			DiskGB:       spec.DiskGB,
+			Internet:     spec.Internet,
+			IdleTimeoutS: int(spec.IdleTimeout.Seconds()),
+			MaxLifetimeS: int(spec.MaxLifetime.Seconds()),
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("provision sandbox %s: %w", spec.ID, err)
+	}
+	now := time.Now()
+	return &plane.SessionInfo{
+		ID:           spec.ID,
+		UserID:       spec.UserID,
+		Image:        spec.Image,
+		BillingModel: spec.BillingModel,
+		Env:          spec.Env,
+		VCPUs:        spec.VCPUs,
+		MemoryMB:     spec.MemoryMB,
+		DiskGB:       spec.DiskGB,
+		Internet:     spec.Internet,
+		IdleTimeout:  spec.IdleTimeout,
+		MaxLifetime:  spec.MaxLifetime,
+		CreatedAt:    now,
+		LastUsed:     now,
+		State:        plane.StateActive,
+	}, nil
+}
+
+func sessionInfoFromRef(ref platform.SandboxRef, spec SandboxSpec) *plane.SessionInfo {
+	state := plane.StateActive
+	if ref.State == "paused" {
+		state = plane.StatePaused
+	}
+	return &plane.SessionInfo{
+		ID:           ref.ID,
+		UserID:       ref.UserID,
+		Image:        ref.Image,
+		BillingModel: ref.BillingModel,
+		VCPUs:        ref.VCPUs,
+		MemoryMB:     ref.MemoryMB,
+		DiskGB:       ref.DiskGB,
+		Internet:     ref.Internet,
+		IdleTimeout:  time.Duration(ref.IdleTimeoutMs) * time.Millisecond,
+		MaxLifetime:  spec.MaxLifetime,
+		CreatedAt:    ref.Created,
+		LastUsed:     ref.LastUsed,
+		State:        state,
+	}
 }
 
 func (s *Service) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (plane.ExecResult, error) {
