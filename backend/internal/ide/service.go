@@ -2,6 +2,7 @@ package ide
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -13,6 +14,25 @@ import (
 )
 
 const DefaultPort uint16 = 3001
+
+// machineSettings are the defaults a sandbox's IDE starts with, so it opens
+// ready to use instead of in first-run setup. OpenVSCode keeps the browser's
+// own User settings in the browser (IndexedDB), so the only settings file in
+// the sandbox it reads is the server's Machine settings ("Remote" in the
+// Settings editor). Those apply every setting scope except application:
+// workspace trust and telemetry are application settings, so startCommand
+// turns them off with server flags instead.
+const machineSettings = `{
+  "workbench.startupEditor": "none",
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
+  "workbench.tips.enabled": false,
+  "workbench.colorTheme": "Default Dark Modern",
+  "extensions.ignoreRecommendations": true,
+  "chat.disableAIFeatures": true,
+  "git.openRepositoryInParentFolders": "always",
+  "git.autofetch": false
+}
+`
 
 type CommandRunner interface {
 	Exec(context.Context, string, string, int) (executor.ExecutionResult, error)
@@ -101,9 +121,17 @@ func (s *Service) startCommand() string {
 		"if [ -s \"$pid_file\" ] && kill -0 \"$(cat \"$pid_file\")\" 2>/dev/null; then exit 0; fi",
 		"rm -f \"$pid_file\"",
 		"[ -x " + shellQuote(s.config.Binary) + " ] || { printf 'OpenVSCode is not installed at %s\\n' " + shellQuote(s.config.Binary) + " >&2; exit 127; }",
+		strings.Join(machineSettingsCommands(), "; "),
+		// --default-folder opens the workspace (the server ignores a
+		// positional folder). Workspace trust and telemetry are application
+		// settings, which Machine settings cannot set, so they are flags.
 		"nohup " + shellQuote(s.config.Binary) +
 			" --host 0.0.0.0 --port " + port +
-			" --without-connection-token " + shellQuote(s.config.Workspace) +
+			" --without-connection-token" +
+			" --server-data-dir \"$data_dir\"" +
+			" --default-folder " + shellQuote(s.config.Workspace) +
+			" --disable-workspace-trust" +
+			" --telemetry-level off" +
 			" >\"$log_file\" 2>&1 </dev/null & pid=$!",
 		"printf '%s\\n' \"$pid\" >\"$pid_file\"",
 		"i=0; while [ \"$i\" -lt 30 ]; do wget -q -O /dev/null http://127.0.0.1:" + port + "/ && exit 0; kill -0 \"$pid\" 2>/dev/null || break; i=$((i + 1)); sleep 1; done",
@@ -111,6 +139,26 @@ func (s *Service) startCommand() string {
 		"exit 1",
 	}, "; ")
 	return "( " + command + " )"
+}
+
+// machineSettingsCommands set data_dir to OpenVSCode's server data directory
+// and write machineSettings there unless the sandbox already has Machine
+// settings. Theme and other changes made in the IDE are saved to that file,
+// so an existing one is the user's and is never rewritten.
+func machineSettingsCommands() []string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(machineSettings))
+	return []string{
+		// The server's default, ~/.openvscode-server, where ~ is $HOME or, if
+		// that is unset or empty, root's home. The start command passes it
+		// with --server-data-dir so the server reads the file written here.
+		"home=${HOME:-/root}",
+		"data_dir=${home%/}/.openvscode-server",
+		"settings_dir=$data_dir/data/Machine",
+		"settings_file=$settings_dir/settings.json",
+		// 0700, as the server creates its own data directories.
+		"(umask 077 && mkdir -p \"$settings_dir\")",
+		"if [ ! -e \"$settings_file\" ]; then printf '%s' " + shellQuote(encoded) + " | base64 -d >\"$settings_file.tmp\"; mv -f \"$settings_file.tmp\" \"$settings_file\"; fi",
+	}
 }
 
 func (s *Service) statusCommand() string {
