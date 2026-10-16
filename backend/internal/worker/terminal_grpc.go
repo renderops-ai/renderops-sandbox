@@ -37,14 +37,23 @@ func (s *TerminalGRPCServer) OpenTerminal(ctx context.Context, request *workerv1
 	if request.GetColumns() < 20 || request.GetColumns() > 500 || request.GetRows() < 5 || request.GetRows() > 200 {
 		return nil, status.Error(codes.InvalidArgument, "terminal size is outside the supported range")
 	}
-	if err := s.svc.OpenTerminal(
-		ctx,
-		request.GetSandboxId(),
-		request.GetTerminalId(),
-		request.GetShell(),
-		uint16(request.GetColumns()),
-		uint16(request.GetRows()),
-	); err != nil {
+	start := terminal.Command{Argv: request.GetCommand(), Cwd: request.GetCwd(), EnvFile: request.GetEnvFile()}
+	var err error
+	if start.IsZero() {
+		err = s.svc.OpenTerminal(ctx, request.GetSandboxId(), request.GetTerminalId(), request.GetShell(),
+			uint16(request.GetColumns()), uint16(request.GetRows()))
+	} else {
+		if validateErr := start.Validate(); validateErr != nil {
+			return nil, status.Error(codes.InvalidArgument, validateErr.Error())
+		}
+		opener, ok := s.svc.(envTerminalOpener)
+		if !ok {
+			return nil, status.Error(codes.Unimplemented, "this worker cannot start terminal commands")
+		}
+		err = opener.OpenTerminalWithEnv(ctx, request.GetSandboxId(), request.GetTerminalId(), request.GetShell(),
+			uint16(request.GetColumns()), uint16(request.GetRows()), start.StartupEnv())
+	}
+	if err != nil {
 		slog.Error("guest terminal creation failed",
 			"sandbox_id", request.GetSandboxId(),
 			"terminal_id", request.GetTerminalId(),
@@ -52,7 +61,17 @@ func (s *TerminalGRPCServer) OpenTerminal(ctx context.Context, request *workerv1
 		)
 		return nil, terminalStatus(err)
 	}
-	return &workerv1.OpenTerminalResponse{TerminalId: request.GetTerminalId(), State: "ready"}, nil
+	return &workerv1.OpenTerminalResponse{
+		TerminalId:     request.GetTerminalId(),
+		State:          "ready",
+		CommandApplied: !start.IsZero(),
+	}, nil
+}
+
+// envTerminalOpener opens a terminal whose shell gets extra environment
+// (session.Manager); terminal commands need it.
+type envTerminalOpener interface {
+	OpenTerminalWithEnv(ctx context.Context, sessionID, terminalID, shell string, columns, rows uint16, env map[string]string) error
 }
 
 func (s *TerminalGRPCServer) CloseTerminal(ctx context.Context, request *workerv1.CloseTerminalRequest) (*workerv1.CloseTerminalResponse, error) {

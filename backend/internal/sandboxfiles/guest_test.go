@@ -43,6 +43,9 @@ type harness struct {
 	shell func(ctx context.Context, stdin string) (plane.ExecResult, error)
 	// fixture runs a setup script with WS set to the workspace.
 	fixture func(script string) (string, error)
+	// serve makes files downloadable by the guest over http and returns
+	// their base URL (extract's downloads).
+	serve func(t *testing.T, files map[string][]byte) string
 }
 
 func TestGuestScriptsLocal(t *testing.T) {
@@ -84,6 +87,7 @@ func TestGuestScriptsLocal(t *testing.T) {
 		staging: filepath.Join(base, "staging"),
 		shell:   run,
 		fixture: func(script string) (string, error) { return fixture(run, script) },
+		serve:   serveLocal,
 	}
 	runScenarios(t, h)
 }
@@ -108,7 +112,8 @@ func TestGuestScriptsAlpine(t *testing.T) {
 			t.Logf("docker rm: %v\n%s", err, out)
 		}
 	})
-	install := "command -v git >/dev/null && command -v bash >/dev/null || apk add --no-cache git bash >/dev/null; mkdir -p /workspace"
+	// The sandbox image's toolbox: busybox plus bash, git, python3 and curl.
+	install := "apk add --no-cache git bash python3 curl >/dev/null; mkdir -p /workspace"
 	if out, err := exec.CommandContext(ctx, "docker", "exec", container, "sh", "-c", install).CombinedOutput(); err != nil {
 		t.Fatalf("install git and bash: %v\n%s", err, out)
 	}
@@ -125,6 +130,7 @@ func TestGuestScriptsAlpine(t *testing.T) {
 		// The guest agent writes each command to its persistent bash's stdin.
 		shell:   run("bash"),
 		fixture: func(script string) (string, error) { return fixture(run("sh"), script) },
+		serve:   serveInContainer(container),
 	}
 	runScenarios(t, h)
 }
@@ -215,7 +221,8 @@ func (r *recorder) arm(before func(n int) error) []recordedCall {
 func (h *harness) client(t *testing.T) (*Client, *recorder) {
 	t.Helper()
 	rec := &recorder{h: h}
-	cfg := guestConfig{Workspace: h.ws, Staging: h.staging, TreeMax: MaxTreeEntries, ChangesMax: MaxChanges}
+	cfg := defaultConfig()
+	cfg.Workspace, cfg.Staging, cfg.AllowHTTP = h.ws, h.staging, true
 	return &Client{exec: rec.exec, cfg: cfg, log: slog.New(slog.DiscardHandler)}, rec
 }
 
@@ -255,6 +262,9 @@ printf 'secret\n' > "$out/dir/secret.txt"`)
 	t.Run("write", func(t *testing.T) { writeScenario(t, h) })
 	t.Run("large write", func(t *testing.T) { largeWriteScenario(t, h) })
 	t.Run("changes", func(t *testing.T) { changesScenario(t, h) })
+	t.Run("patch", func(t *testing.T) { patchScenario(t, h) })
+	t.Run("extract", func(t *testing.T) { extractScenario(t, h) })
+	t.Run("extract malicious", func(t *testing.T) { maliciousExtractScenario(t, h) })
 }
 
 func treeScenario(t *testing.T, h *harness) {

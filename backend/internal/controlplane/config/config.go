@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,24 @@ type Config struct {
 	SecretsEncryptionKey string
 
 	AgentRunner AgentRunner
+	Uploads     Uploads
+}
+
+// Uploads configures CLI folder uploads (internal/uploads): an Azure Blob
+// container that clients PUT archives to through short-lived SAS URLs. Off
+// unless UPLOADS_CONTAINER_NAME is set; then BLOB_STORAGE_ACCOUNT and
+// BLOB_SECRET_KEY (the account's shared key, used to sign the URLs) are
+// required.
+type Uploads struct {
+	Account    string
+	AccountKey string
+	Container  string
+	MaxBytes   int64
+}
+
+// Enabled reports whether uploads are configured.
+func (u Uploads) Enabled() bool {
+	return u.Container != ""
 }
 
 // AgentRunner configures the agent-session runner (internal/agentsession),
@@ -83,7 +102,55 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.AgentRunner = runner
+	uploads, err := loadUploads()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Uploads = uploads
 	return cfg, nil
+}
+
+var (
+	storageAccountPattern   = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
+	storageContainerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+)
+
+const (
+	defaultUploadMaxBytes = 500 << 20
+	minUploadMaxBytes     = 1 << 20
+	maxUploadMaxBytes     = 5000 << 20
+)
+
+// loadUploads reads the UPLOADS_* settings (and the BLOB_* credentials they
+// use). When uploads are on every setting must be valid (fail closed).
+func loadUploads() (Uploads, error) {
+	container := strings.TrimSpace(os.Getenv("UPLOADS_CONTAINER_NAME"))
+	if container == "" {
+		return Uploads{}, nil
+	}
+	uploads := Uploads{
+		Account:    strings.TrimSpace(os.Getenv("BLOB_STORAGE_ACCOUNT")),
+		AccountKey: strings.TrimSpace(os.Getenv("BLOB_SECRET_KEY")),
+		Container:  container,
+		MaxBytes:   defaultUploadMaxBytes,
+	}
+	if !storageContainerPattern.MatchString(container) || strings.Contains(container, "--") {
+		return Uploads{}, fmt.Errorf("UPLOADS_CONTAINER_NAME %q is not a valid Azure Blob container name", container)
+	}
+	if !storageAccountPattern.MatchString(uploads.Account) {
+		return Uploads{}, errors.New("BLOB_STORAGE_ACCOUNT must be set to a storage account name when UPLOADS_CONTAINER_NAME is set")
+	}
+	if uploads.AccountKey == "" {
+		return Uploads{}, errors.New("BLOB_SECRET_KEY must be set when UPLOADS_CONTAINER_NAME is set")
+	}
+	if raw := strings.TrimSpace(os.Getenv("UPLOADS_MAX_BYTES")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < minUploadMaxBytes || value > maxUploadMaxBytes {
+			return Uploads{}, fmt.Errorf("UPLOADS_MAX_BYTES must be a byte count from %d to %d, got %q", int64(minUploadMaxBytes), int64(maxUploadMaxBytes), raw)
+		}
+		uploads.MaxBytes = value
+	}
+	return uploads, nil
 }
 
 // loadAgentRunner reads the AGENT_* settings. When the runner is enabled every

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
@@ -34,11 +36,13 @@ type WriteFileRequest struct {
 }
 
 // fileError is the files API's error body: the usual envelope, plus size for
-// file_too_large and the current sha256 (null: the file is gone) for conflict.
+// file_too_large and patch_too_large, the current sha256 (null: the file is
+// gone) for conflict, and the refused archive entry for extract errors.
 type fileError struct {
 	APIError
 	Size   int64           `json:"size,omitempty"`
 	SHA256 json.RawMessage `json:"sha256,omitempty"`
+	Entry  string          `json:"entry,omitempty"`
 }
 
 var fileErrorStatus = map[string]int{
@@ -57,6 +61,25 @@ var fileErrorStatus = map[string]int{
 	sandboxfiles.CodeConflict:       http.StatusConflict,
 	sandboxfiles.CodeExists:         http.StatusConflict,
 	sandboxfiles.CodeGuestFailed:    http.StatusBadGateway,
+
+	sandboxfiles.CodePatchTooLarge: http.StatusRequestEntityTooLarge,
+
+	sandboxfiles.CodeInvalidDest:        http.StatusBadRequest,
+	sandboxfiles.CodeDestExists:         http.StatusConflict,
+	sandboxfiles.CodeDestNotEmpty:       http.StatusConflict,
+	sandboxfiles.CodeDownloadFailed:     http.StatusBadGateway,
+	sandboxfiles.CodeSizeMismatch:       http.StatusUnprocessableEntity,
+	sandboxfiles.CodeChecksumMismatch:   http.StatusUnprocessableEntity,
+	sandboxfiles.CodeInvalidArchive:     http.StatusUnprocessableEntity,
+	sandboxfiles.CodeUnsafePath:         http.StatusUnprocessableEntity,
+	sandboxfiles.CodeUnsafeLink:         http.StatusUnprocessableEntity,
+	sandboxfiles.CodeUnsupportedEntry:   http.StatusUnprocessableEntity,
+	sandboxfiles.CodeDuplicateEntry:     http.StatusUnprocessableEntity,
+	sandboxfiles.CodeEntryTooLarge:      http.StatusRequestEntityTooLarge,
+	sandboxfiles.CodeArchiveTooLarge:    http.StatusRequestEntityTooLarge,
+	sandboxfiles.CodeTooManyEntries:     http.StatusRequestEntityTooLarge,
+	sandboxfiles.CodeNoSpace:            http.StatusInsufficientStorage,
+	sandboxfiles.CodeExtractUnsupported: http.StatusConflict,
 }
 
 // FileTreeHandler serves GET /v1/sandboxes/{sandboxID}/files/tree?root=.
@@ -139,11 +162,60 @@ func FileChangesHandler(sandboxes plane.Service, execer FileExecer) http.Handler
 	}
 }
 
+// FilePatchHandler serves GET /v1/sandboxes/{sandboxID}/files/patch?root=&base=:
+// the raw `git diff --binary <base>` of the work tree under root, untracked
+// files included, streamed with its size (Content-Length) and sha256. A
+// failure after the headers are sent cuts the body short of Content-Length.
+func FilePatchHandler(sandboxes plane.Service, execer FileExecer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req, ok := openFiles(w, r, sandboxes, execer)
+		if !ok {
+			return
+		}
+		query := r.URL.Query()
+		patch, err := req.files.PreparePatch(r.Context(), query.Get("root"), query.Get("base"))
+		if err != nil {
+			req.fail(w, "patch", err)
+			return
+		}
+		defer req.files.RemovePatch(r.Context(), patch)
+		header := w.Header()
+		header.Set("Content-Type", "text/x-diff")
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Cache-Control", "no-store")
+		header.Set("Content-Length", strconv.FormatInt(patch.Size, 10))
+		header.Set("X-Patch-Base", patch.Base)
+		header.Set("X-Patch-Head", patch.Head)
+		header.Set("X-Patch-Sha256", patch.SHA256)
+		w.WriteHeader(http.StatusOK)
+		if err := req.files.WritePatch(r.Context(), patch, flushingWriter{w}); err != nil {
+			slog.Error("streaming a patch failed", "request_id", req.requestID, "sandbox_id", req.sandboxID, "err", err)
+		}
+	}
+}
+
+// flushingWriter sends each chunk to the client as soon as it is written.
+type flushingWriter struct {
+	w http.ResponseWriter
+}
+
+func (f flushingWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if flushErr := http.NewResponseController(f.w).Flush(); flushErr != nil {
+		return n, fmt.Errorf("flush patch chunk: %w", flushErr)
+	}
+	return n, nil
+}
+
 // filesRequest is one authorized files API request.
 type filesRequest struct {
 	files     *sandboxfiles.Client
 	requestID string
 	sandboxID string
+	userID    string
 }
 
 // openFiles authorizes the request: the caller must own the sandbox (404
@@ -170,7 +242,7 @@ func openFiles(w http.ResponseWriter, r *http.Request, sandboxes plane.Service, 
 		return execer.ExecIfActive(ctx, sandboxID, command, timeoutS, opts)
 	}
 	log := slog.With("component", "files", "request_id", requestID, "sandbox_id", sandboxID)
-	return filesRequest{files: sandboxfiles.New(exec, log), requestID: requestID, sandboxID: sandboxID}, true
+	return filesRequest{files: sandboxfiles.New(exec, log), requestID: requestID, sandboxID: sandboxID, userID: auth.TenantID}, true
 }
 
 // fail writes the error for a failed files operation.
@@ -182,9 +254,9 @@ func (req filesRequest) fail(w http.ResponseWriter, op string, err error) {
 		if !known {
 			status = http.StatusBadGateway
 		}
-		body := fileError{APIError: APIError{Status: "error", Code: fe.Code, Message: fe.Message, RequestID: req.requestID}}
+		body := fileError{APIError: APIError{Status: "error", Code: fe.Code, Message: fe.Message, RequestID: req.requestID}, Entry: fe.Entry}
 		switch fe.Code {
-		case sandboxfiles.CodeFileTooLarge:
+		case sandboxfiles.CodeFileTooLarge, sandboxfiles.CodePatchTooLarge:
 			body.Size = fe.Size
 		case sandboxfiles.CodeConflict:
 			body.SHA256 = json.RawMessage("null")

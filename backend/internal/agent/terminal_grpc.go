@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"time"
 
 	workerv1 "backend/internal/rpc/worker/v1"
 	"backend/internal/terminal"
@@ -26,24 +27,38 @@ func NewTerminalPool(workerToken string) *TerminalPool {
 	return &TerminalPool{workerToken: workerToken, connections: make(map[string]*grpc.ClientConn)}
 }
 
-func (p *TerminalPool) OpenTerminal(ctx context.Context, endpoint, sandboxID, terminalID, shell string, columns, rows uint32) error {
+// OpenTerminal has the worker open a guest PTY. A non-zero start runs a
+// command in it (terminal.Command); a worker that cannot apply start would
+// open a plain shell instead, so that terminal is closed again and the call
+// fails with terminal.ErrCommandUnsupported.
+func (p *TerminalPool) OpenTerminal(ctx context.Context, endpoint, sandboxID, terminalID, shell string, columns, rows uint32, start terminal.Command) error {
 	client, err := p.client(endpoint)
 	if err != nil {
 		return err
 	}
-	ctx = metadata.AppendToOutgoingContext(ctx, workerTokenMetadata, p.workerToken)
-	response, err := client.OpenTerminal(ctx, &workerv1.OpenTerminalRequest{
+	response, err := client.OpenTerminal(metadata.AppendToOutgoingContext(ctx, workerTokenMetadata, p.workerToken), &workerv1.OpenTerminalRequest{
 		TerminalId: terminalID,
 		SandboxId:  sandboxID,
 		Shell:      shell,
 		Columns:    columns,
 		Rows:       rows,
+		Command:    start.Argv,
+		Cwd:        start.Cwd,
+		EnvFile:    start.EnvFile,
 	})
 	if err != nil {
 		return fmt.Errorf("worker open terminal: %w", err)
 	}
 	if response.GetTerminalId() != terminalID || response.GetState() != "ready" {
 		return fmt.Errorf("worker returned invalid terminal readiness")
+	}
+	if !start.IsZero() && !response.GetCommandApplied() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if closeErr := p.CloseTerminal(closeCtx, endpoint, sandboxID, terminalID); closeErr != nil {
+			return fmt.Errorf("%w (closing its plain shell failed: %v)", terminal.ErrCommandUnsupported, closeErr)
+		}
+		return terminal.ErrCommandUnsupported
 	}
 	return nil
 }
