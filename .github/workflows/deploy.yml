@@ -59,6 +59,7 @@ jobs:
               - 'backend/internal/modelaccess/**'
               - 'backend/internal/modelrelay/**'
               - 'backend/internal/rpc/**'
+              - 'backend/internal/sandboxfiles/**'
               - 'backend/internal/sandboximage/**'
               - 'backend/internal/secrets/**'
               - 'backend/internal/terminal/**'

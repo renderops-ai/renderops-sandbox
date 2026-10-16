@@ -581,11 +581,32 @@ func (m *Manager) lockCreate(sandboxID string) func() {
 	}
 }
 
+// ErrNotActive means the session is not running and the command asked not to
+// resume it (ExecOptions.ActiveOnly).
+var ErrNotActive = errors.New("session is not active")
+
+// ExecOptions changes how ExecWithOptions treats the session's lifecycle. The
+// zero value is Exec's behavior.
+type ExecOptions struct {
+	// ActiveOnly fails with ErrNotActive instead of resuming a paused session.
+	ActiveOnly bool
+	// Passive does not count the command as activity: LastUsed (the idle
+	// timer), RunCount and LastExitCode are left alone.
+	Passive bool
+}
+
 // Exec runs a shell command in the session's persistent bash process
 func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
-	// Transparently resume a paused session before running.
-	if err := m.ensureActive(ctx, sessionID); err != nil {
-		return executor.ExecutionResult{}, fmt.Errorf("resume session: %w", err)
+	return m.ExecWithOptions(ctx, sessionID, command, timeoutSec, ExecOptions{})
+}
+
+// ExecWithOptions is Exec with lifecycle options (see ExecOptions).
+func (m *Manager) ExecWithOptions(ctx context.Context, sessionID, command string, timeoutSec int, opts ExecOptions) (executor.ExecutionResult, error) {
+	if !opts.ActiveOnly {
+		// Transparently resume a paused session before running.
+		if err := m.ensureActive(ctx, sessionID); err != nil {
+			return executor.ExecutionResult{}, fmt.Errorf("resume session: %w", err)
+		}
 	}
 
 	sess, ok := m.store.Get(sessionID)
@@ -596,7 +617,15 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
-	sess.LastUsed = time.Now()
+	// Checked under the lock: a pause that finished while this command waited
+	// leaves no VM to run it on.
+	if opts.ActiveOnly && (sess.State != StateActive || sess.VM == nil || sess.VsockConn == nil) {
+		return executor.ExecutionResult{}, fmt.Errorf("%w: session %s is %s", ErrNotActive, sessionID, sess.State)
+	}
+
+	if !opts.Passive {
+		sess.LastUsed = time.Now()
+	}
 
 	if timeoutSec <= 0 {
 		timeoutSec = 30
@@ -608,9 +637,11 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 		return executor.ExecutionResult{}, fmt.Errorf("exec failed: %w", err)
 	}
 
-	sess.RunCount++
-	exitCode := resp.ExitCode
-	sess.LastExitCode = &exitCode
+	if !opts.Passive {
+		sess.RunCount++
+		exitCode := resp.ExitCode
+		sess.LastExitCode = &exitCode
+	}
 
 	return executor.ExecutionResult{
 		OutputLogsCaptured: m.logsEnabled(),

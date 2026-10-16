@@ -158,8 +158,11 @@ func (c *Client) doWith(ctx context.Context, client *http.Client, method, path s
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e plane.ErrorResponse
 		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
-			if e.Code == "no_capacity" {
+			switch e.Code {
+			case "no_capacity":
 				return fmt.Errorf("%w: %s", plane.ErrNoCapacity, e.Error)
+			case "sandbox_not_active":
+				return fmt.Errorf("%w: %s", plane.ErrSandboxNotActive, e.Error)
 			}
 			return fmt.Errorf("agent %s: %s", e.Code, e.Error)
 		}

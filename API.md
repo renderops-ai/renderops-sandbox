@@ -489,6 +489,168 @@ cookie, and redirects to the same URL without the token. The IDE cookie lasts
 one hour and is valid only for that sandbox hostname and port. It is stripped
 before proxying the request to the worker and OpenVSCode Server.
 
+## Files
+
+Read and write files in a sandbox's `/workspace` (the dashboard's Code tab).
+All four routes need the sandbox's owner (`404 sandbox_not_found` otherwise)
+and an active sandbox: a paused one is never resumed by these routes and
+answers `409 sandbox_not_active`, so the caller can offer Resume. Responses
+carry `Cache-Control: no-store`.
+
+Paths (`root`, `path`) must be absolute, already clean (no `.` or `..`
+segments, no `//`, no trailing `/`), free of NUL bytes, at most 4096 bytes,
+and inside `/workspace` after the sandbox resolves symlinks; anything else is
+`400 invalid_path`. Writes are also refused under any `.git` directory.
+`rev` and `base` are full 40-character lower-case commit shas
+(`400 invalid_rev`).
+
+Reads (tree, content, changes) do not count as sandbox activity: they do not
+reset the idle timer, so a sandbox nobody uses pauses on time even while the
+Code tab polls. Saves do count, like any command. Every request runs a short
+script through the sandbox's shell, and that shell's output goes to the
+sandbox's output log, so file contents read here also appear there (as
+base64).
+
+### `GET /v1/sandboxes/{sandboxID}/files/tree?root={dir}`
+
+Lists every file under `root`, relative to it. In a git work tree: tracked
+files plus untracked files that are not ignored (`git ls-files -c`, then
+`git ls-files -o --exclude-standard`; tracked files deleted from the work tree
+are left out). Elsewhere: every non-directory entry except inside `.git`,
+`node_modules`, `.venv`, `__pycache__`, `build` and `dist` directories. At most
+20 000 entries, sorted; `truncated` says more exist.
+
+```bash
+curl -sS "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/files/tree?root=/workspace/repo" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "root": "/workspace/repo",
+  "git": true,
+  "files": [".gitignore", "app/src/Main.kt", "README.md"],
+  "truncated": false
+}
+```
+
+Errors: `404 not_found` (root missing), `400 not_a_directory`.
+
+### `GET /v1/sandboxes/{sandboxID}/files/content?path={file}[&rev={sha}]`
+
+Returns a file of at most 2 MiB. With `rev`, the file as it is in that commit
+of the git repository containing `path` (the file may since have been deleted
+from the work tree).
+
+```bash
+curl -sS "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/files/content?path=/workspace/repo/app/src/Main.kt" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "path": "/workspace/repo/app/src/Main.kt",
+  "size": 1234,
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "binary": false,
+  "content": "package app\n...",
+  "mode": "100644"
+}
+```
+
+`sha256` is the hex sha256 of the file's bytes; send it back as
+`expected_sha256` when saving. `mode` is `100644` or `100755` (with `rev`, the
+mode git recorded). A file with a NUL byte in its first 8 KiB, or that is not
+valid UTF-8, has `"binary": true` and no `content`. A symlink in the work tree
+is followed to its target, which must also be inside `/workspace`; with `rev`
+the target's path is read from that commit.
+
+Errors: `413 file_too_large` with the file's `size`, `404 file_not_found`,
+`400 not_a_file` (directory, FIFO, device), and with `rev`:
+`400 not_a_git_repo`, `404 rev_not_found` (commit not in the repository),
+`404 not_in_revision` (no such file in that commit).
+
+```json
+{"status":"error","code":"file_too_large","message":"file is larger than 2 MiB","request_id":"...","size":3145728}
+```
+
+### `PUT /v1/sandboxes/{sandboxID}/files/content`
+
+Saves a file of at most 2 MiB.
+
+```bash
+curl -sS -X PUT "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/files/content" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/workspace/repo/app/src/Main.kt","content":"package app\n","expected_sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}'
+```
+
+```json
+{
+  "path": "/workspace/repo/app/src/Main.kt",
+  "size": 12,
+  "sha256": "75d99e22087438b67ab1768073505b6ad05fa235b57f02efe129400534b6053c"
+}
+```
+
+`expected_sha256` is the `sha256` the editor loaded (any case). If the file
+changed since, the save is refused with `409 conflict` and the file's current
+`sha256` (`null` when it was deleted). `null` (or omitting it) creates a new
+file and is refused with `409 exists` if the file is there.
+
+The write is atomic: the content goes to a temporary file in the same
+directory, which gets the existing file's permissions (new files `0644`) and
+is renamed over the file, or hard-linked into place for a new file. The sha is
+compared just before the write and again right before the rename; a change in
+the microseconds between that last check and the rename is not detected
+(nothing in the sandbox locks files against the agent). Content over 192 KiB
+(256 KiB as base64) is uploaded in chunks to `/var/tmp/spawn-files` first and
+moved in by the final step; a 2 MiB save takes a few seconds.
+
+Errors: `413 file_too_large` (with `size` when known), `404 parent_not_found`
+(the directory does not exist), `400 not_a_file`, `400 invalid_path` (also
+under `.git`), `400 invalid_sha256`, `400 invalid_request` (body is not
+`{path, content, expected_sha256}`; `content` is required).
+
+```json
+{"status":"error","code":"conflict","message":"file changed since it was loaded","request_id":"...","sha256":"2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"}
+```
+
+### `GET /v1/sandboxes/{sandboxID}/files/changes?root={dir}&base={sha}`
+
+What changed under `root` since commit `base`: the work tree (uncommitted
+edits included) against `base`, `git diff --find-renames <base>`, plus
+untracked files that are not ignored. Paths are relative to `root`.
+
+```bash
+curl -sS "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/files/changes?root=/workspace/repo&base=4b6299a1c0e2d3f4a5b6c7d8e9f0a1b2c3d4e5f6" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "base": "4b6299a1c0e2d3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+  "head": "f0ccf0f2b1a0c9d8e7f6a5b4c3d2e1f0a9b8c7d6",
+  "files": [
+    {"path": "app/src/Main.kt", "status": "M", "additions": 12, "deletions": 3},
+    {"path": "app/src/New.kt", "from": "app/src/Old.kt", "status": "R", "additions": 1, "deletions": 1},
+    {"path": "docs/notes.md", "status": "?", "additions": 0, "deletions": 0}
+  ],
+  "truncated": false
+}
+```
+
+`status` is `A` (added), `M` (modified, including type changes), `D`
+(deleted), `R` (renamed; `from` is the old path) or `?` (untracked).
+`additions`/`deletions` are line counts; they are 0 for binary and untracked
+files. `head` is the current `HEAD` (empty before the first commit). At most
+2 000 files; `truncated` says more exist.
+
+Errors: `400 not_a_git_repo`, `404 rev_not_found` (`base` is not in the
+repository), `404 not_found`, `400 not_a_directory`.
+
+Any unexpected failure inside the sandbox is `502 files_failed`.
+
 ## Catalog
 
 ### `GET /v1/catalog`
@@ -651,6 +813,11 @@ other worker routes require `X-Worker-Token: $WORKER_TOKEN`.
 | `POST` | `/worker/sandbox/{id}/pause` | Snapshot and release active compute |
 | `POST` | `/worker/sandbox/{id}/resume` | Reserve compute and restore |
 | `DELETE` | `/worker/sandbox/{id}` | Destroy local state and release capacity |
+
+An exec body may set `"active_only": true` (refuse a sandbox that is not
+running with `409 sandbox_not_active` instead of resuming it) and
+`"passive": true` (do not reset the idle timer, run count or last exit code).
+The files API sets both for reads and `active_only` for writes.
 
 Terminal create/attach/close uses the internal worker gRPC service on the same
 private listener. Preview traffic uses the worker's sandbox-port proxy path.

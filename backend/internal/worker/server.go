@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"backend/internal/executor"
 	"backend/internal/plane"
 	"backend/internal/session"
 )
@@ -176,6 +177,10 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
+		if req.ActiveOnly || req.Passive {
+			s.execWithOptions(w, r, id, req)
+			return
+		}
 		res, err := s.svc.Exec(r.Context(), id, req.Command, req.TimeoutS)
 		s.writeResult(w, res, err)
 
@@ -237,6 +242,30 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "not_found", "unknown worker operation")
 	}
+}
+
+// optionsExecer runs a command with lifecycle options (session.Manager).
+type optionsExecer interface {
+	ExecWithOptions(ctx context.Context, sessionID, command string, timeoutSec int, opts session.ExecOptions) (executor.ExecutionResult, error)
+}
+
+// execWithOptions serves an exec that must not resume a paused sandbox or must
+// not count as activity (the dashboard's files API).
+func (s *Server) execWithOptions(w http.ResponseWriter, r *http.Request, sandboxID string, req plane.ExecRequest) {
+	execer, ok := s.svc.(optionsExecer)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "exec_options_unsupported", "worker cannot run commands with lifecycle options")
+		return
+	}
+	res, err := execer.ExecWithOptions(r.Context(), sandboxID, req.Command, req.TimeoutS, session.ExecOptions{
+		ActiveOnly: req.ActiveOnly,
+		Passive:    req.Passive,
+	})
+	if errors.Is(err, session.ErrNotActive) {
+		writeErr(w, http.StatusConflict, "sandbox_not_active", err.Error())
+		return
+	}
+	s.writeResult(w, res, err)
 }
 
 type portTargetResolver interface {
