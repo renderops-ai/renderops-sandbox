@@ -613,6 +613,11 @@ type incomingMessage struct {
 	Shell        string            `json:"shell"`
 	Columns      uint16            `json:"columns"`
 	Rows         uint16            `json:"rows"`
+	// Quiet (exec only) keeps the command's output out of the output feed, so
+	// platform-internal commands (file reads and writes, agent polls, setup)
+	// do not reach the sandbox's logs. The output is still returned. Absent
+	// means false: hosts that never send it get today's behavior.
+	Quiet bool `json:"quiet"`
 }
 
 var terminals = newTerminalManager(maxGuestTerminals)
@@ -892,8 +897,14 @@ type shellResult struct {
 	err      error
 }
 
-func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr string, exitCode int, err error) {
-	const stderrFile = "/tmp/.exec_stderr"
+// execStderrFile receives a persistent-shell command's stderr. A variable so
+// tests can move it.
+var execStderrFile = "/tmp/.exec_stderr"
+
+// exec runs command in the persistent shell. Its output is copied into the
+// output feed unless quiet is set; either way it is returned.
+func (s *ShellSession) exec(command string, timeoutSec int, quiet bool) (stdout, stderr string, exitCode int, err error) {
+	stderrFile := execStderrFile
 
 	// Wrap command: redirect stderr to tmp file, print sentinel with exit code when done
 	wrapped := fmt.Sprintf("{ %s\n} 2>%s\n__ec=$?; printf '\\n%s%%d\\n' $__ec\n",
@@ -914,7 +925,9 @@ func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr stri
 				return
 			}
 			lines = append(lines, line)
-			outputLogs.write("stdout", []byte(line+"\n"))
+			if !quiet {
+				outputLogs.write("stdout", []byte(line+"\n"))
+			}
 		}
 		ch <- shellResult{nil, -1, fmt.Errorf("shell process died")}
 	}()
@@ -932,14 +945,16 @@ func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr stri
 			stdout = strings.Join(r.lines, "\n") + "\n"
 		}
 		stderrBytes, _ := os.ReadFile(stderrFile)
-		outputLogs.write("stderr", stderrBytes)
+		if !quiet {
+			outputLogs.write("stderr", stderrBytes)
+		}
 		return stdout, string(stderrBytes), r.exitCode, nil
 	case <-time.After(time.Duration(timeoutSec) * time.Second):
 		return "", "", -1, fmt.Errorf("command timed out after %ds", timeoutSec)
 	}
 }
 
-func handleExec(conn io.Writer, command string, timeoutSec int) {
+func handleExec(conn io.Writer, command string, timeoutSec int, quiet bool) {
 	if timeoutSec <= 0 {
 		timeoutSec = 30
 	}
@@ -952,7 +967,7 @@ func handleExec(conn io.Writer, command string, timeoutSec int) {
 		return
 	}
 
-	stdout, stderr, exitCode, err := sh.exec(command, timeoutSec)
+	stdout, stderr, exitCode, err := sh.exec(command, timeoutSec, quiet)
 	if err != nil {
 		evictShell()
 		json.NewEncoder(conn).Encode(ExecutionResponse{
@@ -1022,7 +1037,7 @@ func handleConnection(connFd int) {
 			continue
 		}
 		if msg.Type == "exec" {
-			handleExec(conn, msg.Command, msg.Timeout)
+			handleExec(conn, msg.Command, msg.Timeout, msg.Quiet)
 			continue
 		}
 		if msg.Type == "logs_follow" {
