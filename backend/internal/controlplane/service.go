@@ -283,6 +283,53 @@ func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSe
 	return res, s.reconcile(ctx, sessionID, err)
 }
 
+// ExecIfActive runs a shell command only while the sandbox is running. Unlike
+// Exec it never resumes a paused sandbox: it fails with plane.ErrSandboxNotActive,
+// and the worker does too if the sandbox pauses before the command reaches it.
+// A passive command (the dashboard reading files) does not count as activity,
+// so the sandbox's idle timer is left alone.
+func (s *Service) ExecIfActive(ctx context.Context, sandboxID, command string, timeoutSec int, passive bool) (plane.ExecResult, error) {
+	worker := func(endpoint string) workerExecer { return agent.NewClient(endpoint, s.workerToken) }
+	res, err := execIfActive(ctx, s.orchestrator, worker, sandboxID, plane.ExecRequest{
+		Command: command, TimeoutS: timeoutSec, ActiveOnly: true, Passive: passive,
+	})
+	if err != nil {
+		return res, err
+	}
+	if !passive {
+		s.db.TouchSandbox(ctx, sandboxID)
+	}
+	return res, nil
+}
+
+// placementGetter is the part of the orchestrator client execIfActive needs.
+type placementGetter interface {
+	Placement(ctx context.Context, sandboxID string) (orchestrator.Placement, error)
+}
+
+// workerExecer is the part of the worker client execIfActive needs.
+type workerExecer interface {
+	Exec(ctx context.Context, sandboxID string, req plane.ExecRequest) (plane.ExecResult, error)
+}
+
+func execIfActive(ctx context.Context, orch placementGetter, worker func(endpoint string) workerExecer, sandboxID string, req plane.ExecRequest) (plane.ExecResult, error) {
+	placement, err := orch.Placement(ctx, sandboxID)
+	if err != nil {
+		return plane.ExecResult{}, fmt.Errorf("resolve sandbox worker: %w", err)
+	}
+	if placement.State != "active" {
+		return plane.ExecResult{}, fmt.Errorf("%w: sandbox %s is %s", plane.ErrSandboxNotActive, sandboxID, placement.State)
+	}
+	if placement.Endpoint == "" {
+		return plane.ExecResult{}, fmt.Errorf("sandbox %s has no worker endpoint", sandboxID)
+	}
+	res, err := worker(placement.Endpoint).Exec(ctx, sandboxID, req)
+	if err != nil {
+		return plane.ExecResult{}, fmt.Errorf("exec on worker %s: %w", placement.WorkerID, err)
+	}
+	return res, nil
+}
+
 // reconcile self-heals zombie rows: if the agent no longer has the VM (e.g. it
 // restarted and lost all in-memory VMs), the DB row is still "active" but dead.
 // On a not-found error we mark it destroyed so it drops out of the dashboard,

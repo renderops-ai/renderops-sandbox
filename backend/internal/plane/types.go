@@ -7,6 +7,10 @@ import (
 
 var ErrNoCapacity = errors.New("worker has insufficient capacity")
 
+// ErrSandboxNotActive means the sandbox is not running (paused, resuming, ...)
+// and the command asked not to resume it (ExecRequest.ActiveOnly).
+var ErrSandboxNotActive = errors.New("sandbox is not active")
+
 // SessionInfo is the plane-neutral view of a sandbox session — everything the
 // control plane may know about one. Host-side runtime state (VM handles,
 // snapshots, vsock) lives in internal/session on top of this.
@@ -99,6 +103,12 @@ type RunRequest struct {
 type ExecRequest struct {
 	Command  string `json:"command"`
 	TimeoutS int    `json:"timeout_s,omitempty"`
+	// ActiveOnly refuses a sandbox that is not running (409
+	// sandbox_not_active) instead of resuming a paused one first.
+	ActiveOnly bool `json:"active_only,omitempty"`
+	// Passive does not count the command as activity: the sandbox's idle
+	// timer, run count and last exit code are left alone.
+	Passive bool `json:"passive,omitempty"`
 }
 
 // ExecResult is the wire form of an execution outcome. Field tags stay in

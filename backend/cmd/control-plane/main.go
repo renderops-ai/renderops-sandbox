@@ -148,6 +148,12 @@ func main() {
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ide/sessions", handler.CreateIDESessionHandler(svc, orchestratorClient, ideWorkers, ideSigner, cfg.PreviewDomain))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/model-access", handler.CreateModelAccessHandler(svc, orchestratorClient, modelWorkers, platformClient, secretsKey))
 	publicMux.HandleFunc("DELETE /v1/sandboxes/{sandboxID}/model-access", handler.DeleteModelAccessHandler(svc, orchestratorClient, modelWorkers))
+	// Files API for the dashboard's Code tab: guest scripts through the
+	// worker's exec, never resuming a paused sandbox.
+	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/tree", handler.FileTreeHandler(svc, svc))
+	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/content", handler.ReadFileHandler(svc, svc))
+	publicMux.HandleFunc("PUT /v1/sandboxes/{sandboxID}/files/content", handler.WriteFileHandler(svc, svc))
+	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/changes", handler.FileChangesHandler(svc, svc))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)
