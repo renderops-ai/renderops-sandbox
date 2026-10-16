@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -475,6 +476,13 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 }
 
 func (m *Manager) OpenTerminal(ctx context.Context, sessionID, terminalID, shell string, columns, rows uint16) error {
+	return m.OpenTerminalWithEnv(ctx, sessionID, terminalID, shell, columns, rows, nil)
+}
+
+// OpenTerminalWithEnv is OpenTerminal with extra environment for this
+// terminal's shell, over the sandbox's own env (a terminal command's startup,
+// see terminal.Command.StartupEnv). The sandbox's env is not changed.
+func (m *Manager) OpenTerminalWithEnv(ctx context.Context, sessionID, terminalID, shell string, columns, rows uint16, env map[string]string) error {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
@@ -495,6 +503,12 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID, terminalID, shell
 		return ctx.Err()
 	default:
 	}
+	terminalEnv := sess.Env
+	if len(env) > 0 {
+		terminalEnv = make(map[string]string, len(sess.Env)+len(env))
+		maps.Copy(terminalEnv, sess.Env)
+		maps.Copy(terminalEnv, env)
+	}
 	client := firecracker.NewVsockClient(sess.VM.VsockPath)
 	if err := client.OpenTerminalOnConn(sess.VsockConn, firecracker.TerminalOpenRequest{
 		TerminalID: terminalID,
@@ -502,7 +516,7 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID, terminalID, shell
 		Shell:      shell,
 		Columns:    columns,
 		Rows:       rows,
-		Env:        sess.Env,
+		Env:        terminalEnv,
 	}); err != nil {
 		return err
 	}

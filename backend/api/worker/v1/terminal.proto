@@ -39,11 +39,20 @@ message OpenTerminalRequest {
   string shell = 3;
   uint32 columns = 4;
   uint32 rows = 5;
+  // Optional startup (internal/terminal.Command): run command (argv) instead
+  // of leaving the shell at a prompt, after changing to cwd and sourcing
+  // env_file. All empty opens a plain shell.
+  repeated string command = 6;
+  string cwd = 7;
+  string env_file = 8;
 }
 
 message OpenTerminalResponse {
   string terminal_id = 1;
   string state = 2;
+  // True when the worker applied command, cwd and env_file. Workers that
+  // predate them leave it false (and open a plain shell).
+  bool command_applied = 3;
 }
 
 message CloseTerminalRequest {

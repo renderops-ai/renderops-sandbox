@@ -429,6 +429,39 @@ curl -sS -X POST \
 Only `/bin/bash` is currently supported. Columns must be `20..500`; rows must
 be `5..200`. Defaults are 120 x 32.
 
+Optionally the terminal can start in a directory, load an env file and run a
+command instead of a prompt (the spawn CLI opens `claude` this way):
+
+```json
+{
+  "columns": 120, "rows": 32,
+  "command": ["claude", "--continue"],
+  "cwd": "/workspace/repo",
+  "env_file": "/var/lib/spawn/cli/env"
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `command` | argv array, run with `exec` (no shell parsing). 1 to 256 arguments, 16 KiB in total, UTF-8 without NUL; `command[0]` must not be empty or start with `-`. Omit it for a shell. |
+| `cwd` | Absolute, clean path: `/workspace` or below. |
+| `env_file` | Absolute, clean path below `/var/lib/spawn/`. Sourced with every assignment exported (`set -a`), so both `KEY=value` and `export KEY=value` lines work. |
+
+All three are optional and independent; with only `cwd`/`env_file` the user
+gets a prompt there with the env loaded. The terminal ends when the command
+exits, with its exit code (`exit` frame). Nothing is typed into the PTY, so
+neither the env file nor the command is echoed: the worker hands the startup to
+the login shell as a one-shot `PROMPT_COMMAND` (user values only as base64
+literals), which bash runs after the login profile and unsets before the
+command starts. Exit code `125` means the directory or env file could not be
+used (a `spawn: ...` line says which); `127` means the command could not be
+started. The shell's `HOME` is the guest's (`/` unless the sandbox env sets
+it); set `HOME=/root` in the env file for tools that keep state in `~`.
+
+Errors: `400 invalid_terminal_options` (with the reason), and `502
+terminal_command_unsupported` when the sandbox's worker predates terminal
+commands (the terminal is not left open).
+
 Success: `201 Created`, `Cache-Control: no-store`
 
 ```json
@@ -663,7 +696,139 @@ files. `head` is the current `HEAD` (empty before the first commit). At most
 Errors: `400 not_a_git_repo`, `404 rev_not_found` (`base` is not in the
 repository), `404 not_found`, `400 not_a_directory`.
 
+### `GET /v1/sandboxes/{sandboxID}/files/patch?root={dir}&base={sha}`
+
+Everything that changed under `root` since commit `base`, as one patch to `git
+apply`: `git diff --binary --find-renames <base>` of the work tree, so commits
+since `base`, staged and unstaged edits, deletions, and untracked files that
+are not ignored (as new files). Untracked nested repositories are left out.
+The repository's own index is never written: untracked files are added
+intent-to-add to a copy of it. Paths are relative to `root`.
+
+```bash
+curl -sS -D headers.txt -o agent.patch \
+  "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/files/patch?root=/workspace/repo&base=4b6299a1c0e2d3f4a5b6c7d8e9f0a1b2c3d4e5f6" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+git apply --binary agent.patch
+```
+
+`200 OK` with the raw patch as the body (`Content-Type: text/x-diff`; empty
+when nothing changed) and:
+
+| Header | Value |
+| --- | --- |
+| `Content-Length` | The patch's size. |
+| `X-Patch-Sha256` | The patch's sha256. |
+| `X-Patch-Base` | `base`. |
+| `X-Patch-Head` | The current `HEAD` (empty before the first commit). |
+
+The patch is at most 50 MiB: larger is `413 patch_too_large` with `size` (at
+least that many bytes). The body streams in 2 MiB pieces; if the sandbox fails
+part way, the body ends short of `Content-Length`, so check the length and
+`X-Patch-Sha256` before applying. Other errors are those of `changes`. Like
+the other reads it does not count as sandbox activity.
+
 Any unexpected failure inside the sandbox is `502 files_failed`.
+
+## Uploads
+
+Send a folder to a sandbox without streaming it through the API: create an
+upload, PUT a `.tar.gz` straight to blob storage, then have the sandbox
+download and unpack it. Both routes need the sandbox's owner (`404
+sandbox_not_found`) and an active sandbox (`409 sandbox_not_active`; never
+resumed here). A server without upload storage answers `503
+uploads_unavailable`.
+
+### `POST /v1/sandboxes/{sandboxID}/uploads`
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/uploads" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"size": 18734211, "sha256": "9f2c...64 hex..."}'
+```
+
+`size` is the archive's size in bytes (1 to `max_bytes`, 500 MiB by default)
+and `sha256` its lower-case hex sha256. `201 Created`:
+
+```json
+{
+  "status": "success",
+  "upload_id": "0d3c6a52-5f7e-4f0a-9d1e-2b8f3c4a5e6d",
+  "put_url": "https://<account>.blob.core.windows.net/<container>/uploads/0d3c6a52-....tar.gz?sv=...&sp=cw&sr=b&spr=https&se=...&sig=...",
+  "put_headers": {"x-ms-blob-type": "BlockBlob"},
+  "expires_at": "2026-10-17T12:15:00Z",
+  "max_bytes": 524288000
+}
+```
+
+PUT the archive to `put_url` in one request with `put_headers`:
+
+```bash
+curl -sS --fail -X PUT -H "x-ms-blob-type: BlockBlob" --data-binary @repo.tar.gz "$PUT_URL"
+```
+
+The URL can only create or overwrite that one blob, over HTTPS, until
+`expires_at` (15 minutes). Errors: `413 upload_too_large` (with `max_bytes`),
+`400 invalid_size`, `400 invalid_sha256`, `429 too_many_uploads` (8
+unextracted uploads per sandbox).
+
+### `POST /v1/sandboxes/{sandboxID}/uploads/{uploadID}/extract`
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/uploads/$UPLOAD_ID/extract" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dest": "/workspace/repo"}'
+```
+
+`dest` must be an absolute, clean path below `/workspace` (not `/workspace`
+itself), outside any `.git` directory; it must not exist yet, or be an empty
+directory. Missing parents are created. The sandbox downloads the archive
+through a 10-minute read-only URL (the sandbox needs internet access), checks
+its size and sha256, and unpacks it into a temporary directory next to `dest`,
+which then replaces `dest` in one rename: `dest` gets the whole archive or
+nothing. The archive is validated in full before anything is written:
+
+- entries are regular files, directories, symlinks or hard links (no devices,
+  fifos or sparse files), each name at most once;
+- no absolute names and no `..` components;
+- no entry below a symlink, and every symlink resolves inside `dest`, also when
+  followed through the archive's other symlinks;
+- hard links only to a regular file earlier in the archive;
+- at most 200 000 entries, 2 GiB per file and 4 GiB in total.
+
+Python's `tarfile` `data` filter runs while unpacking, and every symlink is
+checked with `realpath` afterwards. Setuid/setgid bits and group/other write
+bits are dropped; files are owned by root (the sandbox user).
+
+`200 OK`:
+
+```json
+{"status": "success", "upload_id": "0d3c6a52-...", "dest": "/workspace/repo", "entries": 1834, "bytes": 52011873}
+```
+
+The upload is single-use: a successful extract deletes it and its blob. An
+archive the sandbox refuses is deleted too; any other failure (`dest` in use,
+the download, the sandbox) keeps the upload so the caller can retry until
+`expires_at`. Expired uploads and their blobs are deleted. It counts as sandbox
+activity.
+
+| Status | Code | Meaning | Upload kept |
+| --- | --- | --- | --- |
+| 404 | `upload_not_found` | Unknown, already extracted, or another sandbox's. | – |
+| 410 | `upload_expired` | Create a new upload. | no |
+| 409 | `upload_incomplete` | The archive has not been PUT yet. | yes |
+| 409 | `upload_busy` | Another extract of this upload is running. | yes |
+| 400 | `invalid_dest` | See the `dest` rules. | yes |
+| 409 | `dest_exists` / `dest_not_empty` | `dest` is a file / a non-empty directory. | yes |
+| 502 | `download_failed` | The sandbox could not download the archive. | yes |
+| 422 | `size_mismatch` / `checksum_mismatch` | The archive is not what was declared. | no |
+| 422 | `invalid_archive` | Not a readable `.tar.gz`. | no |
+| 422 | `unsafe_path` / `unsafe_link` / `unsupported_entry` / `duplicate_entry` | A refused entry; `entry` names it. | no |
+| 413 | `entry_too_large` / `archive_too_large` / `too_many_entries` | Over a cap. | no |
+| 507 | `no_space` | The sandbox's disk is full. | yes |
+| 409 | `extract_unsupported` | The sandbox has no Python 3.12+ (every current image does). | yes |
 
 ## Catalog
 

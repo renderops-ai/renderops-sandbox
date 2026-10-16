@@ -19,14 +19,20 @@ type TerminalPlacementResolver interface {
 }
 
 type TerminalWorker interface {
-	OpenTerminal(context.Context, string, string, string, string, uint32, uint32) error
+	OpenTerminal(ctx context.Context, endpoint, sandboxID, terminalID, shell string, columns, rows uint32, start terminal.Command) error
 	CloseTerminal(context.Context, string, string, string) error
 }
 
+// CreateTerminalRequest is the body of POST /v1/sandboxes/{id}/terminals.
+// Command, Cwd and EnvFile are optional (terminal.Command): the terminal
+// starts in Cwd, loads EnvFile and runs Command instead of a prompt.
 type CreateTerminalRequest struct {
-	Shell   string `json:"shell,omitempty"`
-	Columns uint32 `json:"columns,omitempty"`
-	Rows    uint32 `json:"rows,omitempty"`
+	Shell   string   `json:"shell,omitempty"`
+	Columns uint32   `json:"columns,omitempty"`
+	Rows    uint32   `json:"rows,omitempty"`
+	Command []string `json:"command,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
+	EnvFile string   `json:"env_file,omitempty"`
 }
 
 type CreateTerminalResponse struct {
@@ -80,6 +86,15 @@ func CreateTerminalHandler(sandboxes plane.Service, placements TerminalPlacement
 			writeTerminalError(w, http.StatusBadRequest, "invalid_terminal_options", "unsupported shell or terminal size", requestID)
 			return
 		}
+		start := terminal.Command{Argv: request.Command, Cwd: request.Cwd, EnvFile: request.EnvFile}
+		if request.Command != nil && len(request.Command) == 0 {
+			writeTerminalError(w, http.StatusBadRequest, "invalid_terminal_options", "command must not be empty; omit it for a shell", requestID)
+			return
+		}
+		if err := start.Validate(); err != nil {
+			writeTerminalError(w, http.StatusBadRequest, "invalid_terminal_options", err.Error(), requestID)
+			return
+		}
 		placement, err := placements.Placement(r.Context(), sandboxID)
 		if err != nil {
 			status := http.StatusServiceUnavailable
@@ -99,7 +114,7 @@ func CreateTerminalHandler(sandboxes plane.Service, placements TerminalPlacement
 		}
 		terminalID := session.ID
 		workerCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		err = workers.OpenTerminal(workerCtx, placement.Endpoint, sandboxID, terminalID, request.Shell, request.Columns, request.Rows)
+		err = workers.OpenTerminal(workerCtx, placement.Endpoint, sandboxID, terminalID, request.Shell, request.Columns, request.Rows, start)
 		cancel()
 		if err != nil {
 			slog.Error("worker terminal creation failed",
@@ -110,6 +125,10 @@ func CreateTerminalHandler(sandboxes plane.Service, placements TerminalPlacement
 				"err", err,
 			)
 			terminals.Cancel(terminalID)
+			if errors.Is(err, terminal.ErrCommandUnsupported) {
+				writeTerminalError(w, http.StatusBadGateway, "terminal_command_unsupported", "the sandbox's worker cannot start terminal commands yet", requestID)
+				return
+			}
 			writeTerminalError(w, http.StatusBadGateway, "terminal_creation_failed", "worker failed to create terminal", requestID)
 			return
 		}

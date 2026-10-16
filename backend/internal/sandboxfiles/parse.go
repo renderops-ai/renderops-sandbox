@@ -77,15 +77,22 @@ func (o *output) size() int64 {
 }
 
 // err turns the script's error line into *Error, with the file's size for
-// file_too_large and its current sha256 (nil: the file is gone) for conflict.
+// file_too_large (the patch's for patch_too_large), its current sha256 (nil:
+// the file is gone) for conflict, and the refused archive entry ("entry
+// <base64>", cut to maxEntryNameBytes) for extract errors.
 func (o *output) err() *Error {
 	e := newError(o.errCode)
 	switch e.Code {
-	case CodeFileTooLarge:
+	case CodeFileTooLarge, CodePatchTooLarge:
 		e.Size = o.size()
 	case CodeConflict:
 		if sum := o.fields["sha256"]; ValidSHA256(sum) {
 			e.SHA256 = &sum
+		}
+	}
+	if encoded := o.fields["entry"]; encoded != "" {
+		if raw, decodeErr := base64.StdEncoding.DecodeString(encoded); decodeErr == nil {
+			e.Entry = strings.ToValidUTF8(string(raw[:min(len(raw), maxEntryNameBytes)]), "�")
 		}
 	}
 	return e

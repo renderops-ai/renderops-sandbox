@@ -63,6 +63,7 @@ jobs:
               - 'backend/internal/sandboximage/**'
               - 'backend/internal/secrets/**'
               - 'backend/internal/terminal/**'
+              - 'backend/internal/uploads/**'
               - 'backend/cmd/control-plane/**'
               - 'backend/cmd/preview-gateway/**'
               - 'backend/internal/controlplane/**'

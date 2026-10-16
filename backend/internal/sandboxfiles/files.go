@@ -76,6 +76,8 @@ const (
 	CodeConflict       = "conflict"
 	CodeExists         = "exists"
 	CodeInvalidSHA256  = "invalid_sha256"
+	// CodePatchTooLarge: the patch is over MaxPatchBytes (see patch.go).
+	CodePatchTooLarge = "patch_too_large"
 	// CodeGuestFailed covers everything else: the exec or the script failed
 	// unexpectedly (the scripts' own write_failed, write_corrupt,
 	// stage_failed and read_failed codes are logged and reported as this).
@@ -87,11 +89,15 @@ const (
 type Error struct {
 	Code    string
 	Message string
-	// Size is the file's size for CodeFileTooLarge (0 when unknown).
+	// Size is the file's size for CodeFileTooLarge and the patch's size (at
+	// least) for CodePatchTooLarge (0 when unknown).
 	Size int64
 	// SHA256 is the file's current sha256 for CodeConflict; nil when the file
 	// no longer exists.
 	SHA256 *string
+	// Entry is the archive entry an extract refused (unsafe_path,
+	// unsafe_link, unsupported_entry, duplicate_entry, entry_too_large).
+	Entry string
 }
 
 func (e *Error) Error() string {
@@ -113,6 +119,25 @@ var errorMessages = map[string]string{
 	CodeConflict:       "file changed since it was loaded",
 	CodeExists:         "file already exists",
 	CodeInvalidSHA256:  "expected_sha256 must be a hex sha256 or null",
+
+	CodePatchTooLarge: "the patch is larger than 50 MiB",
+
+	CodeInvalidDest:        "dest must be an absolute, clean path below /workspace, outside any .git directory",
+	CodeDestExists:         "dest exists and is not a directory",
+	CodeDestNotEmpty:       "dest exists and is not empty",
+	CodeDownloadFailed:     "the sandbox could not download the upload",
+	CodeSizeMismatch:       "the upload's size is not the declared size",
+	CodeChecksumMismatch:   "the upload's sha256 is not the declared sha256",
+	CodeInvalidArchive:     "the upload is not a valid .tar.gz archive",
+	CodeUnsafePath:         "an archive entry has an absolute path or a .. component",
+	CodeUnsafeLink:         "an archive link points outside dest, or an entry goes through a link",
+	CodeUnsupportedEntry:   "an archive entry is not a file, directory, symlink or hard link",
+	CodeDuplicateEntry:     "an archive entry appears twice",
+	CodeEntryTooLarge:      "an archive entry is larger than the per-file limit",
+	CodeArchiveTooLarge:    "the archive unpacks to more than the size limit",
+	CodeTooManyEntries:     "the archive has more entries than the limit",
+	CodeNoSpace:            "the sandbox's disk is full",
+	CodeExtractUnsupported: "the sandbox has no python3 with safe tar extraction (3.12+)",
 }
 
 // newError returns the error for a code; codes the API does not define
@@ -137,10 +162,23 @@ type guestConfig struct {
 	Staging    string
 	TreeMax    int
 	ChangesMax int
+	// Extract caps (see extract.go).
+	ExtractEntries    int64
+	ExtractBytes      int64
+	ExtractEntryBytes int64
+	// AllowHTTP lets Extract download over plain http (tests only).
+	AllowHTTP bool
+	// PatchMax and PatchChunk: see patch.go.
+	PatchMax   int64
+	PatchChunk int64
 }
 
 func defaultConfig() guestConfig {
-	return guestConfig{Workspace: Workspace, Staging: StagingDir, TreeMax: MaxTreeEntries, ChangesMax: MaxChanges}
+	return guestConfig{
+		Workspace: Workspace, Staging: StagingDir, TreeMax: MaxTreeEntries, ChangesMax: MaxChanges,
+		ExtractEntries: MaxExtractEntries, ExtractBytes: MaxExtractBytes, ExtractEntryBytes: MaxExtractEntryBytes,
+		PatchMax: MaxPatchBytes, PatchChunk: PatchChunkBytes,
+	}
 }
 
 // Client runs files operations in one sandbox.

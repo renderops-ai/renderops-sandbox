@@ -33,6 +33,7 @@ type fakeTerminalWorker struct {
 	openCalls  int
 	closeCalls int
 	openErr    error
+	starts     []terminal.Command
 }
 
 type fakeTerminalAttachmentWorker struct {
@@ -70,8 +71,9 @@ func (f *fakeTerminalAttachmentWorker) CloseTerminal(context.Context, string, st
 	return nil
 }
 
-func (f *fakeTerminalWorker) OpenTerminal(context.Context, string, string, string, string, uint32, uint32) error {
+func (f *fakeTerminalWorker) OpenTerminal(_ context.Context, _, _, _, _ string, _, _ uint32, start terminal.Command) error {
 	f.openCalls++
+	f.starts = append(f.starts, start)
 	return f.openErr
 }
 

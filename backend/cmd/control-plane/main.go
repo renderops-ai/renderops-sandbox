@@ -19,6 +19,7 @@ import (
 	"backend/internal/preview"
 	"backend/internal/secrets"
 	"backend/internal/terminal"
+	"backend/internal/uploads"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -139,6 +140,25 @@ func main() {
 		slog.Info("agent session runner disabled (AGENT_RUNNER_ENABLED is not true)")
 	}
 
+	// CLI folder uploads: clients PUT archives to Azure Blob through
+	// short-lived SAS URLs (off unless UPLOADS_CONTAINER_NAME is set).
+	var uploadStore handler.UploadStore
+	uploadsCtx, stopUploads := context.WithCancel(context.Background())
+	defer stopUploads()
+	if cfg.Uploads.Enabled() {
+		blobs, err := uploads.NewAzureBlobs(cfg.Uploads.Account, cfg.Uploads.AccountKey, cfg.Uploads.Container)
+		if err != nil {
+			slog.Error("upload storage initialization failed", "err", err)
+			os.Exit(1)
+		}
+		store := uploads.New(blobs, cfg.Uploads.MaxBytes, slog.With("component", "uploads"))
+		go store.Run(uploadsCtx)
+		uploadStore = store
+		slog.Info("uploads enabled", "container", cfg.Uploads.Container, "max_bytes", cfg.Uploads.MaxBytes)
+	} else {
+		slog.Info("uploads disabled (UPLOADS_CONTAINER_NAME is not set)")
+	}
+
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
@@ -154,6 +174,10 @@ func main() {
 	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/content", handler.ReadFileHandler(svc, svc))
 	publicMux.HandleFunc("PUT /v1/sandboxes/{sandboxID}/files/content", handler.WriteFileHandler(svc, svc))
 	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/changes", handler.FileChangesHandler(svc, svc))
+	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/patch", handler.FilePatchHandler(svc, svc))
+	// CLI uploads: a write URL for an archive, then extract it in the sandbox.
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/uploads", handler.CreateUploadHandler(svc, svc, uploadStore))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/uploads/{uploadID}/extract", handler.ExtractUploadHandler(svc, svc, uploadStore))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)
