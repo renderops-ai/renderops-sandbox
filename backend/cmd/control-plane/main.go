@@ -175,6 +175,9 @@ func main() {
 	publicMux.HandleFunc("PUT /v1/sandboxes/{sandboxID}/files/content", handler.WriteFileHandler(svc, svc))
 	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/changes", handler.FileChangesHandler(svc, svc))
 	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/files/patch", handler.FilePatchHandler(svc, svc))
+	// What the sandbox's agent is doing (its hooks' state file), polled by the
+	// dashboard: a passive read that never resumes or wakes the sandbox.
+	publicMux.HandleFunc("GET /v1/sandboxes/{sandboxID}/agent-state", handler.AgentStateHandler(svc, svc))
 	// CLI uploads: a write URL for an archive, then extract it in the sandbox.
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/uploads", handler.CreateUploadHandler(svc, svc, uploadStore))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/uploads/{uploadID}/extract", handler.ExtractUploadHandler(svc, svc, uploadStore))

@@ -89,7 +89,9 @@ modified by adding this recipe.
 
 Provider authentication, workspace preparation, persistent remote agent sessions
 and reconnect are separate follow-up work. This template supplies executables,
-not those session features. Review each vendor's redistribution/hosting terms
+not those session features. It also installs `tmux` and `/etc/spawn/tmux.conf`
+(no prefix key, no status bar), which the spawn CLI uses to keep an agent
+running after the user closes their terminal. Review each vendor's redistribution/hosting terms
 before publishing the bundled image to customers.
 
 Installation references:

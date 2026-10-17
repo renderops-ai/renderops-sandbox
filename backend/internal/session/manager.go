@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"backend/internal/cgroup"
@@ -97,6 +98,7 @@ type Manager struct {
 	meterLast        map[string]time.Time
 	meterTotals      map[string]MeterSample
 	maxTerminals     int
+	agentBusyGrace   atomic.Int64 // time.Duration; see SetAgentBusyGrace
 	checkpoints      CheckpointWriter
 	checkpointReader CheckpointReader
 }
@@ -139,6 +141,7 @@ func NewManager(
 		meterTotals:    make(map[string]MeterSample),
 		maxTerminals:   8,
 	}
+	m.SetAgentBusyGrace(DefaultAgentBusyGrace)
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
 	}
@@ -1385,6 +1388,9 @@ func (m *Manager) reapOnce(ctx context.Context, now time.Time) {
 
 		switch action {
 		case reapPause:
+			if m.agentWorking(ctx, sessionID, now) {
+				continue
+			}
 			if err := m.pause(ctx, sessionID, now); err != nil {
 				slog.Error("reaper auto-pause failed", "session_id", sessionID, "err", err)
 			}
@@ -1397,7 +1403,8 @@ func (m *Manager) reapOnce(ctx context.Context, now time.Time) {
 }
 
 // reaper periodically PAUSES idle active sessions (freeing RAM/slot while
-// keeping state on disk), destroys sessions past their max lifetime, and hard-deletes
+// keeping state on disk) unless their agent is working (agentWorking),
+// destroys sessions past their max lifetime, and hard-deletes
 // paused sessions past the retention TTL.
 func (m *Manager) reaper() {
 	ticker := time.NewTicker(reaperInterval)

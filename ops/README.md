@@ -296,6 +296,11 @@ WORKER_MAX_TERMINALS_PER_SANDBOX=8
 The orchestrator and worker ratios must agree. Memory should not be
 overcommitted without an explicit workload policy and measured OOM behavior.
 
+`AGENT_BUSY_GRACE` (default `15m`, a Go duration; `0` turns it off): an idle
+sandbox whose agent state file says `working` and was updated within this
+window is not auto-paused (see "Agent State" in API.md). Unset means the
+default; it is not wired into the deploy workflow or `.env` setup.
+
 ### Deployment
 
 The `Deploy` workflow builds one Linux worker binary and rolls it across the

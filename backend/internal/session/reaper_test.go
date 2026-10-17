@@ -33,6 +33,11 @@ func TestReapActionFor(t *testing.T) {
 			want: reapDestroy,
 		},
 		{
+			name: "working agent never extends the maximum lifetime",
+			sess: Session{State: StateActive, CreatedAt: now.Add(-time.Hour), MaxLifetime: time.Hour, LastUsed: now.Add(-10 * time.Minute), IdleTimeout: 5 * time.Minute, agentRecheckAt: now.Add(time.Minute)},
+			want: reapDestroy,
+		},
+		{
 			name: "paused session reaches retention ttl",
 			sess: Session{State: StatePaused, PausedAt: now.Add(-pauseTTL)},
 			want: reapDestroy,

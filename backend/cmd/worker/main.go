@@ -73,6 +73,21 @@ func envFloat(key string, def float64) float64 {
 	return def
 }
 
+// envDuration reads a Go duration ("15m"); "0" is allowed. A malformed or
+// negative value is logged and the default is used.
+func envDuration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		slog.Warn("invalid duration in environment, using default", "key", key, "value", v, "default", def.String(), "err", err)
+		return def
+	}
+	return d
+}
+
 func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, supportedImages []string, capacity func() plane.Capacity) {
 	baseURL := os.Getenv("ORCHESTRATOR_URL")
 	if baseURL == "" {
@@ -382,6 +397,10 @@ func main() {
 		slog.Warn("durable sandbox checkpoints disabled; paused state remains worker-local")
 	}
 	sessionMgr.SetMaxTerminalsPerSandbox(envInt("WORKER_MAX_TERMINALS_PER_SANDBOX", 8))
+	// A detached agent that is still working keeps its idle sandbox awake;
+	// "0" turns this off.
+	sessionMgr.SetAgentBusyGrace(envDuration("AGENT_BUSY_GRACE", session.DefaultAgentBusyGrace))
+	slog.Info("agent busy check", "agent_busy_grace", sessionMgr.AgentBusyGrace().String())
 	for _, recovered := range sessionMgr.Sessions() {
 		admission.Restore(
 			recovered.ID,

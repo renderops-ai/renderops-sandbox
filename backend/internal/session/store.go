@@ -41,6 +41,7 @@ type Session struct {
 	Pool             *firecracker.VMPool   // which pool the VM came from (active only)
 	VsockConn        net.Conn              // persistent vsock connection, reused across all calls
 	Terminals        map[string]struct{}   // active guest PTYs, guarded by mu
+	agentRecheckAt   time.Time             // a working agent defers the idle pause until then (see agentWorking), guarded by mu
 
 	// Auto-pause state. When State == StatePaused the VM is gone and these describe how
 	// to resume it: restore from SnapPath/MemPath, reattach WritableDiskPath in place,

@@ -956,6 +956,59 @@ retry) and `409 sandbox_not_active` if the sandbox paused before the write.
 
 Revokes the grant. `204 No Content`; idempotent.
 
+## Agent State
+
+The spawn CLI runs the agent (Claude) in a `tmux` session inside the sandbox,
+so the user can close their terminal while it keeps working and reattach
+later. Hooks it installs in the agent keep `/var/lib/spawn/agent-state.json`
+up to date:
+
+```json
+{"state": "working", "updated_at": "2026-10-17T12:00:00Z"}
+```
+
+`state` is `working`, `waiting` (for the user), `done` or `idle`;
+`updated_at` is RFC3339.
+
+Idle auto-pause: a sandbox past its idle timeout with no open terminal is not
+paused while its agent is `working` and `updated_at` is within the worker's
+`AGENT_BUSY_GRACE` (default `15m`; the hooks rewrite it on every tool call).
+The worker reads the file again every minute and pauses once the agent stops
+working or its state goes stale. A missing or invalid file never keeps a
+sandbox awake, and nothing extends `max_lifetime_s`. Reading the file does not
+count as activity.
+
+### `GET /v1/sandboxes/{sandboxID}/agent-state`
+
+What the sandbox's agent is doing, for the dashboard to poll. The sandbox must
+be owned by the caller (`404 sandbox_not_found`) and active (`409
+sandbox_not_active`; it is never resumed). The read is passive and quiet: it
+does not reset the idle timer, and it is not recorded in the run history or the
+sandbox's log stream.
+
+```bash
+curl -sS "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/agent-state" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+`200 OK`:
+
+```json
+{"state": "working", "updated_at": "2026-10-17T12:00:00Z", "age_seconds": 42}
+```
+
+`age_seconds` is how long ago the state was written, measured on the
+sandbox's own clock. Use it rather than comparing `updated_at` with your
+clock: a resumed sandbox's clock can run behind. With no state file, or one
+that is not valid, the response is only:
+
+```json
+{"state": "unknown"}
+```
+
+Other errors: `409 sandbox_not_placed`, `502 agent_state_failed` (the sandbox
+could not run the read).
+
 ## Port Previews
 
 ### `POST /v1/sandboxes/{sandboxID}/ports/{port}/preview`
