@@ -33,9 +33,12 @@ type Config struct {
 
 // Uploads configures CLI folder uploads (internal/uploads): an Azure Blob
 // container that clients PUT archives to through short-lived SAS URLs. Off
-// unless UPLOADS_CONTAINER_NAME is set; then BLOB_STORAGE_ACCOUNT and
-// BLOB_SECRET_KEY (the account's shared key, used to sign the URLs) are
-// required.
+// unless UPLOADS_CONTAINER_NAME is set; then UPLOADS_BLOB_ACCOUNT and
+// UPLOADS_BLOB_KEY (the account's shared key, used to sign the URLs) are
+// required. They name a storage account used only for uploads, never the
+// workers' checkpoint/template account (BLOB_STORAGE_ACCOUNT/BLOB_SECRET_KEY):
+// a SAS signed with a key can reach everything that key can, so the BLOB_*
+// variables are deliberately not read here.
 type Uploads struct {
 	Account    string
 	AccountKey string
@@ -121,16 +124,16 @@ const (
 	maxUploadMaxBytes     = 5000 << 20
 )
 
-// loadUploads reads the UPLOADS_* settings (and the BLOB_* credentials they
-// use). When uploads are on every setting must be valid (fail closed).
+// loadUploads reads the UPLOADS_* settings. When uploads are on every
+// setting must be valid (fail closed).
 func loadUploads() (Uploads, error) {
 	container := strings.TrimSpace(os.Getenv("UPLOADS_CONTAINER_NAME"))
 	if container == "" {
 		return Uploads{}, nil
 	}
 	uploads := Uploads{
-		Account:    strings.TrimSpace(os.Getenv("BLOB_STORAGE_ACCOUNT")),
-		AccountKey: strings.TrimSpace(os.Getenv("BLOB_SECRET_KEY")),
+		Account:    strings.TrimSpace(os.Getenv("UPLOADS_BLOB_ACCOUNT")),
+		AccountKey: strings.TrimSpace(os.Getenv("UPLOADS_BLOB_KEY")),
 		Container:  container,
 		MaxBytes:   defaultUploadMaxBytes,
 	}
@@ -138,10 +141,10 @@ func loadUploads() (Uploads, error) {
 		return Uploads{}, fmt.Errorf("UPLOADS_CONTAINER_NAME %q is not a valid Azure Blob container name", container)
 	}
 	if !storageAccountPattern.MatchString(uploads.Account) {
-		return Uploads{}, errors.New("BLOB_STORAGE_ACCOUNT must be set to a storage account name when UPLOADS_CONTAINER_NAME is set")
+		return Uploads{}, errors.New("UPLOADS_BLOB_ACCOUNT must be set to the uploads storage account name when UPLOADS_CONTAINER_NAME is set")
 	}
 	if uploads.AccountKey == "" {
-		return Uploads{}, errors.New("BLOB_SECRET_KEY must be set when UPLOADS_CONTAINER_NAME is set")
+		return Uploads{}, errors.New("UPLOADS_BLOB_KEY must be set when UPLOADS_CONTAINER_NAME is set")
 	}
 	if raw := strings.TrimSpace(os.Getenv("UPLOADS_MAX_BYTES")); raw != "" {
 		value, err := strconv.ParseInt(raw, 10, 64)

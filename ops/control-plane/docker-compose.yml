@@ -54,6 +54,13 @@ services:
       AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
       AGENT_RUNNER_CONCURRENCY: ${AGENT_RUNNER_CONCURRENCY:-}
       AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-}
+      # CLI folder uploads: off unless UPLOADS_CONTAINER_NAME is set; then the
+      # uploads-only storage account and its key are required (never the
+      # workers' checkpoint account). Empty UPLOADS_MAX_BYTES means 500 MiB.
+      UPLOADS_CONTAINER_NAME: ${UPLOADS_CONTAINER_NAME:-}
+      UPLOADS_BLOB_ACCOUNT: ${UPLOADS_BLOB_ACCOUNT:-}
+      UPLOADS_BLOB_KEY: ${UPLOADS_BLOB_KEY:-}
+      UPLOADS_MAX_BYTES: ${UPLOADS_MAX_BYTES:-}
     depends_on:
       postgres:
         condition: service_healthy
