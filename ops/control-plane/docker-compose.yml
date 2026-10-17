@@ -113,6 +113,10 @@ services:
       # the control plane's; unset hides that API).
       AGENT_SESSIONS_ENABLED: ${AGENT_SESSIONS_ENABLED:-}
       AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
+      # Slack integration (dashboard Integrations page); off while empty.
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
