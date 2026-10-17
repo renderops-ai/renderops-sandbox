@@ -166,7 +166,7 @@ func main() {
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ports/{port}/preview", handler.CreatePreviewHandler(svc, previewSigner, cfg.PreviewDomain))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ide/sessions", handler.CreateIDESessionHandler(svc, orchestratorClient, ideWorkers, ideSigner, cfg.PreviewDomain))
-	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/model-access", handler.CreateModelAccessHandler(svc, orchestratorClient, modelWorkers, platformClient, secretsKey))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/model-access", handler.CreateModelAccessHandler(svc, orchestratorClient, modelWorkers, platformClient, secretsKey, svc))
 	publicMux.HandleFunc("DELETE /v1/sandboxes/{sandboxID}/model-access", handler.DeleteModelAccessHandler(svc, orchestratorClient, modelWorkers))
 	// Files API for the dashboard's Code tab: guest scripts through the
 	// worker's exec, never resuming a paused sandbox.

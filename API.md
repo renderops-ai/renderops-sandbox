@@ -908,11 +908,49 @@ The sandbox must be active and owned by the caller.
 }
 ```
 
-Pass `env` to the agent process (for example in an exec command). Grants last
-4 hours; grant again to extend. Errors: `409 credentials_missing` (nothing saved
-on the Secrets page), `409 sandbox_not_active`, `400 provider_unavailable`
-(`openai`), `503 model_access_unavailable` (server has no
-`SECRETS_ENCRYPTION_KEY`).
+Pass `env` to the agent process. Grants last 4 hours; grant again to extend
+(each grant has a new token and replaces the sandbox's previous one). Errors:
+`409 credentials_missing` (nothing saved on the Secrets page), `409
+sandbox_not_active`, `400 provider_unavailable` (`openai`), `503
+model_access_unavailable` (server has no `SECRETS_ENCRYPTION_KEY`).
+
+Note that a command sent through `POST /session/{sandboxID}/exec` is kept in
+the sandbox's run history, so don't put the token in one. To hand the env to
+a terminal, have the server write it instead:
+
+#### Writing the env into the sandbox (`env_file`)
+
+```json
+{"provider": "anthropic", "env_file": "/var/lib/spawn/cli/env"}
+```
+
+After the grant, the control plane writes `env` plus `HOME=/root` to
+`env_file` in the sandbox, one `export KEY='value'` line per variable (sorted,
+every value single-quoted). The file is mode `0600` and its directory `0700`
+(created if missing); the file is replaced atomically. The write is an internal
+exec: it is not recorded in the run history, usage logs or the sandbox's log
+stream. `env_file` must be an absolute, clean path (no `..`) below
+`/var/lib/spawn/`, the same rule as a terminal's `env_file`, so the result can
+be passed straight to `POST /v1/sandboxes/{sandboxID}/terminals`.
+
+The token is then left out of the response: `token` and `env` are omitted,
+and `env_file_written` is `true`:
+
+```json
+{
+  "status": "success",
+  "provider": "anthropic",
+  "model": "claude-opus-5-5",
+  "base_url": "http://172.16.0.1:7081",
+  "expires_at": "2026-10-16T16:00:00Z",
+  "env_file": "/var/lib/spawn/cli/env",
+  "env_file_written": true
+}
+```
+
+Extra errors: `400 invalid_env_file` (checked before anything is granted),
+`502 env_file_failed` (the sandbox could not write the file; grant again to
+retry) and `409 sandbox_not_active` if the sandbox paused before the write.
 
 ### `DELETE /v1/sandboxes/{sandboxID}/model-access`
 
