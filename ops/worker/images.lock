@@ -2,4 +2,4 @@
 # Built and uploaded to Azure Blob (rootfs-release/<image>/<version>/) by the
 # "Agents image" workflow, which prints the line to add here. The deploy passes
 # these to workers as WORKER_IMAGES. No lines = workers serve alpine only.
-agents agents-202610162355-7963fab 6eddc5713ad11d4a60c14d4166c80767971fec2527cf738d55631acaffc0b37c
+agents agents-202610171205-6e663f8 017d57f68e3708913e843f7da03baba6cf4016cafacec0fd265b0f5fbe0c27fe
