@@ -352,7 +352,8 @@ func (s *Service) reconcile(ctx context.Context, sessionID string, err error) er
 		s.db.TouchSandbox(ctx, sessionID)
 		return nil
 	}
-	if !strings.Contains(err.Error(), "not found") {
+	// The worker lost the VM and reports it; the row becomes "lost", not destroyed.
+	if errors.Is(err, plane.ErrSandboxLost) || !strings.Contains(err.Error(), "not found") {
 		return err
 	}
 	_ = s.orchestrator.Destroy(ctx, sessionID)
@@ -408,6 +409,37 @@ func activePlacement(ctx context.Context, orch placementResumer, sandboxID strin
 	}
 	placement.State = "active"
 	return placement, nil
+}
+
+// lostReasonReader is the part of the platform database LostSandbox needs.
+type lostReasonReader interface {
+	GetSandbox(ctx context.Context, id string) (platform.SandboxRef, bool, error)
+	SandboxLostReason(ctx context.Context, sandboxID string) (string, error)
+}
+
+// LostSandbox reports whether the sandbox is lost (its VM is gone and nothing
+// can resume it), with its owner and the reason recorded when it was lost.
+func (s *Service) LostSandbox(ctx context.Context, id string) (userID, reason string, lost bool) {
+	return lostSandbox(ctx, s.db, id)
+}
+
+func lostSandbox(ctx context.Context, rows lostReasonReader, id string) (string, string, bool) {
+	ref, ok, err := rows.GetSandbox(ctx, id)
+	if err != nil {
+		slog.Warn("read sandbox for lost check failed", "sandbox_id", id, "err", err)
+		return "", "", false
+	}
+	if !ok || ref.State != "lost" {
+		return "", "", false
+	}
+	reason, err := rows.SandboxLostReason(ctx, ref.ID)
+	if err != nil {
+		slog.Warn("read sandbox lost reason failed", "sandbox_id", id, "err", err)
+	}
+	if reason == "" {
+		reason = "VM is gone"
+	}
+	return ref.UserID, reason, true
 }
 
 // GetSession reads the sandbox row; destroyed sandboxes read as gone.

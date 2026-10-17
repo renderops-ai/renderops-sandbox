@@ -88,7 +88,49 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return d
 }
 
-func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, supportedImages []string, capacity func() plane.Capacity) {
+// inventoryInterval is how often the worker sends the orchestrator the
+// sandboxes it holds, so rows of sandboxes it lost (e.g. in a restart) are
+// marked lost. It is also sent right after every registration.
+const inventoryInterval = time.Minute
+
+// workerInventory is what the session manager holds, for the orchestrator.
+func workerInventory(mgr *session.Manager) orchestrator.WorkerInventory {
+	held, lost, complete := mgr.Inventory()
+	inventory := orchestrator.WorkerInventory{
+		Sandboxes:          held,
+		DurableCheckpoints: mgr.DurableCheckpoints(),
+		Complete:           complete,
+	}
+	if inventory.Sandboxes == nil {
+		inventory.Sandboxes = []string{}
+	}
+	for _, sandbox := range lost {
+		inventory.Lost = append(inventory.Lost, orchestrator.LostSandbox{ID: sandbox.ID, Reason: sandbox.Reason})
+	}
+	return inventory
+}
+
+// reportInventory sends the inventory and acknowledges the lost sandboxes the
+// orchestrator received.
+func reportInventory(ctx context.Context, client *orchestrator.Client, workerID string, mgr *session.Manager) error {
+	inventory := workerInventory(mgr)
+	result, err := client.ReportInventory(ctx, workerID, inventory)
+	if err != nil {
+		return err
+	}
+	lostIDs := make([]string, 0, len(inventory.Lost))
+	for _, sandbox := range inventory.Lost {
+		lostIDs = append(lostIDs, sandbox.ID)
+	}
+	mgr.AckLost(lostIDs)
+	if len(result.MarkedLost) > 0 {
+		slog.Warn("orchestrator marked sandboxes missing from this worker as lost",
+			"worker_id", workerID, "sandbox_ids", result.MarkedLost)
+	}
+	return nil
+}
+
+func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, supportedImages []string, capacity func() plane.Capacity, sessions *session.Manager) {
 	baseURL := os.Getenv("ORCHESTRATOR_URL")
 	if baseURL == "" {
 		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
@@ -123,12 +165,14 @@ func startOrchestratorRegistration(ctx context.Context, maxSessions int, physica
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		registered := false
+		var lastInventory time.Time
 		for {
 			if !registered {
 				if err := client.RegisterWorker(ctx, registration); err != nil {
 					slog.Warn("worker registration failed", "worker_id", registration.ID, "err", err)
 				} else {
 					registered = true
+					lastInventory = time.Time{} // reconcile right after (re)registering
 					slog.Info("worker registered", "worker_id", registration.ID, "endpoint", registration.Endpoint)
 					if err := client.Heartbeat(ctx, registration.ID, capacity()); err != nil {
 						registered = false
@@ -138,6 +182,13 @@ func startOrchestratorRegistration(ctx context.Context, maxSessions int, physica
 			} else if err := client.Heartbeat(ctx, registration.ID, capacity()); err != nil {
 				registered = false
 				slog.Warn("worker heartbeat failed; registration will be retried", "worker_id", registration.ID, "err", err)
+			}
+			if registered && time.Since(lastInventory) >= inventoryInterval {
+				if err := reportInventory(ctx, client, registration.ID, sessions); err != nil {
+					slog.Warn("worker inventory report failed; will retry", "worker_id", registration.ID, "err", err)
+				} else {
+					lastInventory = time.Now()
+				}
 			}
 
 			select {
@@ -336,8 +387,29 @@ func main() {
 	}
 
 	var onState session.StateHook
+	// A lost sandbox frees its local reservation; with an orchestrator, its
+	// final usage is flushed and the loss reported (the row becomes "lost").
+	onLost := func(sandboxID, _, _ string) error {
+		admission.Release(sandboxID)
+		return nil
+	}
 	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
 		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
+		onLost = func(sandboxID, _, reason string) error {
+			admission.Release(sandboxID)
+			// Usage is accepted only from the placed worker, so flush before
+			// the report releases the placement.
+			if usageReporter != nil {
+				flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := usageReporter.Flush(flushCtx); err != nil {
+					slog.Error("flush final usage of lost sandbox failed", "sandbox_id", sandboxID, "err", err)
+				}
+				flushCancel()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return orchestrationClient.ReportWorkerLost(ctx, workerID, sandboxID, reason)
+		}
 		onState = func(sandboxID, _ string, state string) error {
 			switch state {
 			case "active":
@@ -396,6 +468,7 @@ func main() {
 	} else {
 		slog.Warn("durable sandbox checkpoints disabled; paused state remains worker-local")
 	}
+	sessionMgr.SetLostHook(onLost)
 	sessionMgr.SetMaxTerminalsPerSandbox(envInt("WORKER_MAX_TERMINALS_PER_SANDBOX", 8))
 	// A detached agent that is still working keeps its idle sandbox awake;
 	// "0" turns this off.
@@ -506,7 +579,7 @@ func main() {
 	}()
 
 	registrationCtx, stopRegistration := context.WithCancel(context.Background())
-	startOrchestratorRegistration(registrationCtx, maxSessions, h.Capacity.PhysicalVCPUs, supportedImages, admission.Capacity)
+	startOrchestratorRegistration(registrationCtx, maxSessions, h.Capacity.PhysicalVCPUs, supportedImages, admission.Capacity, sessionMgr)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -555,6 +628,13 @@ func main() {
 		slog.Error("worker drained with unpaused sessions", "err", err)
 	}
 	pauseCancel()
+	// Whatever is still running dies with this process: report it lost now so
+	// its row does not stay active.
+	loseCtx, loseCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if lost := sessionMgr.LoseUnpaused(loseCtx, session.LostReasonShutdown); len(lost) > 0 {
+		slog.Error("sandboxes lost at shutdown", "count", len(lost), "sandbox_ids", lost)
+	}
+	loseCancel()
 
 	sessionMgr.Shutdown(context.Background())
 	if usageReporter != nil {

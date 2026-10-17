@@ -16,6 +16,7 @@ import (
 	"backend/internal/checkpoint"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
+	"backend/internal/plane"
 	"backend/internal/sandboximage"
 	"backend/internal/terminal"
 	"backend/internal/vmsize"
@@ -101,6 +102,16 @@ type Manager struct {
 	agentBusyGrace   atomic.Int64 // time.Duration; see SetAgentBusyGrace
 	checkpoints      CheckpointWriter
 	checkpointReader CheckpointReader
+
+	// Lost sandboxes (see lost.go).
+	lostMu       sync.Mutex
+	lost         map[string]*lostRecord // by session id
+	onLost       LostHook
+	recoveryErr  error                                                   // why paused sessions could not be recovered at start
+	vmMu         sync.Mutex                                              // guards vmSessions
+	vmSessions   map[string]string                                       // VM id -> id of the session running on it
+	readOOMKills func(*Session) (uint64, error)                          // test seam; nil reads the session's cgroup
+	waitExited   func(*firecracker.MicroVM) (firecracker.ExitInfo, bool) // test seam; nil waits on the VM's process
 }
 
 type createLock struct {
@@ -140,7 +151,11 @@ func NewManager(
 		meterLast:      make(map[string]time.Time),
 		meterTotals:    make(map[string]MeterSample),
 		maxTerminals:   8,
+		lost:           make(map[string]*lostRecord),
+		vmSessions:     make(map[string]string),
 	}
+	// A VM process that exits without a teardown stopping it makes its session lost.
+	vmManager.SetExitHandler(m.handleVMExit)
 	m.SetAgentBusyGrace(DefaultAgentBusyGrace)
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -260,6 +275,9 @@ func (m *Manager) recoverPaused() {
 	sessions, err := readManifest(m.manifestPath)
 	if err != nil {
 		slog.Error("failed to read paused-session manifest", "path", m.manifestPath, "err", err)
+		// The inventory reports itself incomplete, so the orchestrator does not
+		// take paused sandboxes this worker failed to recover for lost ones.
+		m.recoveryErr = err
 		return
 	}
 	recovered := 0
@@ -449,6 +467,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 		pool.Release(pvm)
 		return nil, err
 	}
+	m.bindVM(sess.ID, pvm.VM.ID)
 	m.meterMu.Lock()
 	m.meterLast[sess.ID] = sess.CreatedAt
 	m.meterMu.Unlock()
@@ -460,6 +479,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 	vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
 	conn, err := vsockClient.Connect()
 	if err != nil {
+		m.unbindVM(pvm.VM.ID)
 		pool.Release(pvm)
 		m.store.Delete(sess.ID)
 		return nil, fmt.Errorf("vsock connect failed: %w", err)
@@ -638,12 +658,16 @@ func (m *Manager) ExecWithOptions(ctx context.Context, sessionID, command string
 
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
-		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+		return executor.ExecutionResult{}, m.missingErr(sessionID)
 	}
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
+	// The VM died while this command waited for the lock.
+	if sess.State == StateLost {
+		return executor.ExecutionResult{}, m.missingErr(sessionID)
+	}
 	// Checked under the lock: a pause that finished while this command waited
 	// leaves no VM to run it on.
 	if opts.ActiveOnly && (sess.State != StateActive || sess.VM == nil || sess.VsockConn == nil) {
@@ -690,12 +714,15 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string,
 
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
-		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+		return executor.ExecutionResult{}, m.missingErr(sessionID)
 	}
 
 	// serialize concurrent calls on the same session
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	if sess.State == StateLost {
+		return executor.ExecutionResult{}, m.missingErr(sessionID)
+	}
 
 	sess.LastUsed = time.Now()
 
@@ -736,6 +763,11 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	m.revokeSlotGrants(sessionID)
 	m.slotBindMu.Unlock()
 	if !ok {
+		// A lost sandbox was already released when it was lost.
+		if m.forgetLost(sessionID) {
+			slog.Info("lost session destroyed", "session_id", sessionID)
+			return nil
+		}
 		return fmt.Errorf("session %s not found", sessionID)
 	}
 	m.meterSession(sess, sess.State, time.Now())
@@ -763,6 +795,9 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		sess.VsockConn.Close()
 	}
 
+	if sess.VM != nil {
+		m.unbindVM(sess.VM.ID)
+	}
 	if sess.PooledVM != nil && sess.Pool != nil {
 		// pool handles cgroup destruction and replenishment
 		sess.Pool.Release(sess.PooledVM)
@@ -801,15 +836,26 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.Time) error {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
-		return fmt.Errorf("session %s not found", sessionID)
+		return m.missingErr(sessionID)
 	}
 
 	if m.template == nil {
 		return fmt.Errorf("cannot pause session %s: no snapshot template (cold-boot mode)", sessionID)
 	}
 
+	// A pause that finds the VM dead loses the session; it is reported once
+	// the session lock is released (deferred before the unlock, so it runs after).
+	lost := false
+	defer func() {
+		if lost {
+			m.reportLost(sessionID)
+		}
+	}()
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	if sess.State == StateLost {
+		return m.missingErr(sessionID)
+	}
 	if !idleCheckAt.IsZero() {
 		idleDeadline := sess.LastUsed.Add(sess.IdleTimeout)
 		if sess.State != StateActive || sess.IdleTimeout <= 0 || idleCheckAt.Before(idleDeadline) || len(sess.Terminals) > 0 {
@@ -891,6 +937,14 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	previousMem := sess.VM.MemBasePath
 	snapshotStart := time.Now()
 	if err := m.vmManager.SnapshotMemory(ctx, vmID, snapPath, memPath); err != nil {
+		// A dead VM refuses the snapshot ("connection refused" on its API
+		// socket). Retrying cannot help: the session is lost.
+		if info, dead := m.vmExited(sess.VM); dead {
+			reason := m.deathReason(sess, info)
+			m.loseLocked(sess, reason)
+			lost = true
+			return fmt.Errorf("snapshot for pause: %w", &plane.LostError{Reason: reason})
+		}
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
 	snapshotTime := time.Since(snapshotStart)
@@ -930,6 +984,7 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	if err := m.vmManager.TeardownKeepDisk(ctx, vmID); err != nil {
 		slog.Error("pause teardown failed", "session_id", sessionID, "err", err)
 	}
+	m.unbindVM(vmID)
 	if sess.Cgroup != nil {
 		sess.Cgroup.Destroy()
 	}
@@ -982,11 +1037,14 @@ func (m *Manager) rollbackFailedCheckpoint(ctx context.Context, sess *Session, v
 func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
-		return fmt.Errorf("session %s not found", sessionID)
+		return m.missingErr(sessionID)
 	}
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	if sess.State == StateLost {
+		return m.missingErr(sessionID)
+	}
 	if sess.State == StateActive {
 		return m.notifyState(sess, "active")
 	}
@@ -1103,6 +1161,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.VsockConn = conn
 	sess.PooledVM = nil // resumed VM is standalone; Destroy releases its slot + disk directly
 	sess.Pool = nil
+	m.bindVM(sess.ID, vm.ID)
 	m.meterSession(sess, StatePaused, time.Now())
 	sess.State = StateActive
 	sess.LastUsed = time.Now()
@@ -1185,7 +1244,7 @@ func (m *Manager) hydrateCheckpoint(ctx context.Context, sess *Session) error {
 func (m *Manager) ensureActive(ctx context.Context, sessionID string) error {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
-		return fmt.Errorf("session %s not found", sessionID)
+		return m.missingErr(sessionID)
 	}
 	if sess.State == StatePaused {
 		return m.Resume(ctx, sessionID)
@@ -1236,6 +1295,9 @@ func (m *Manager) removePauseDirs(sessionID string) {
 		return
 	}
 	for _, dir := range []string{m.pauseDir, m.legacyPauseDir} {
+		if dir == "" {
+			continue
+		}
 		if err := os.RemoveAll(filepath.Join(dir, sessionID)); err != nil {
 			slog.Warn("remove pause dir", "session_id", sessionID, "dir", dir, "err", err)
 		}
@@ -1380,6 +1442,7 @@ func reapActionFor(sess *Session, now time.Time) reapAction {
 }
 
 func (m *Manager) reapOnce(ctx context.Context, now time.Time) {
+	m.pruneLost(now)
 	for _, sess := range m.store.All() {
 		sess.mu.Lock()
 		action := reapActionFor(sess, now)

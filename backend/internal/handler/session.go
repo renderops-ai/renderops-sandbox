@@ -221,8 +221,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
-				http.Error(w, "session not found", http.StatusNotFound)
+			if !ownsLiveSession(w, r, mgr, sessionID, auth.TenantID, requestID) {
 				return
 			}
 
@@ -246,6 +245,9 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			result, err := mgr.Execute(r.Context(), sessionID, req.Code, req.Language, runTimeoutSec)
 			if err != nil {
 				slog.Error("session execute failed", "session_id", sessionID, "err", err)
+				if writeIfLost(w, requestID, sessionID, err) {
+					return
+				}
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
@@ -329,8 +331,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
-				http.Error(w, "session not found", http.StatusNotFound)
+			if !ownsLiveSession(w, r, mgr, sessionID, auth.TenantID, requestID) {
 				return
 			}
 
@@ -363,6 +364,9 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			}
 			if err != nil {
 				slog.Error("session exec failed", "session_id", sessionID, "quiet", req.Quiet, "err", err)
+				if writeIfLost(w, requestID, sessionID, err) {
+					return
+				}
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
@@ -451,12 +455,14 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
-				http.Error(w, "session not found", http.StatusNotFound)
+			if !ownsLiveSession(w, r, mgr, sessionID, auth.TenantID, requestID) {
 				return
 			}
 			if err := mgr.Pause(r.Context(), sessionID); err != nil {
 				slog.Error("session pause failed", "session_id", sessionID, "err", err)
+				if writeIfLost(w, requestID, sessionID, err) {
+					return
+				}
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -474,12 +480,14 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
-				http.Error(w, "session not found", http.StatusNotFound)
+			if !ownsLiveSession(w, r, mgr, sessionID, auth.TenantID, requestID) {
 				return
 			}
 			if err := mgr.Resume(r.Context(), sessionID); err != nil {
 				slog.Error("session resume failed", "session_id", sessionID, "err", err)
+				if writeIfLost(w, requestID, sessionID, err) {
+					return
+				}
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -492,8 +500,11 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 		case r.Method == http.MethodDelete && path != "":
 			sessionID := path
 			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
-				http.Error(w, "session not found", http.StatusNotFound)
-				return
+				// A lost sandbox can still be removed.
+				if _, lost := lostOwnedSandbox(r.Context(), mgr, sessionID, auth.TenantID); !lost {
+					http.Error(w, "session not found", http.StatusNotFound)
+					return
+				}
 			}
 
 			// Debit remaining wall-clock before destroy (sync so we don't lose the charge).
@@ -528,6 +539,10 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 
 			sess, ok := mgr.GetSession(r.Context(), sessionID)
 			if !ok || sess.UserID != auth.TenantID {
+				if reason, lost := lostOwnedSandbox(r.Context(), mgr, sessionID, auth.TenantID); lost {
+					writeSandboxLost(w, requestID, sessionID, reason)
+					return
+				}
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}

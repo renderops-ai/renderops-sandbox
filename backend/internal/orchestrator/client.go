@@ -84,6 +84,25 @@ func (c *Client) ReportWorkerState(ctx context.Context, workerID, sandboxID, sta
 	)
 }
 
+// ReportWorkerLost reports a sandbox whose VM the worker lost, with the reason.
+func (c *Client) ReportWorkerLost(ctx context.Context, workerID, sandboxID, reason string) error {
+	return c.do(
+		ctx,
+		http.MethodPost,
+		"/internal/workers/"+workerID+"/sandboxes/"+sandboxID+"/state",
+		map[string]string{"state": "lost", "reason": reason},
+		nil,
+	)
+}
+
+// ReportInventory sends what the worker holds for the orchestrator to
+// reconcile its placements with.
+func (c *Client) ReportInventory(ctx context.Context, workerID string, inventory WorkerInventory) (ReconcileResult, error) {
+	var result ReconcileResult
+	err := c.do(ctx, http.MethodPost, "/internal/workers/"+workerID+"/inventory", inventory, &result)
+	return result, err
+}
+
 func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, "/health", nil, nil)
 }
@@ -130,6 +149,8 @@ func (c *Client) doWith(ctx context.Context, client *http.Client, method, path s
 				return fmt.Errorf("%w: %s", ErrWorkerNotFound, apiError["error"])
 			case "invalid_state", "invalid_sandbox_state":
 				return fmt.Errorf("%w: %s", ErrInvalidState, apiError["error"])
+			case "sandbox_lost":
+				return &plane.LostError{Reason: apiError["reason"]}
 			default:
 				return fmt.Errorf("orchestrator %s: %s", apiError["code"], apiError["error"])
 			}

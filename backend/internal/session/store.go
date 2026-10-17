@@ -15,6 +15,10 @@ type SessionState string
 const (
 	StateActive SessionState = "active" // live VM holding a slot + RAM
 	StatePaused SessionState = "paused" // snapshotted to disk; no live VM, slot/RAM freed
+	// StateLost: the VM died (or could not be paused before the worker shut
+	// down). Nothing is left to resume; the session is out of the store and
+	// only a lost record remains (see lost.go).
+	StateLost SessionState = "lost"
 )
 
 type Session struct {

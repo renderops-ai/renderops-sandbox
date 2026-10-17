@@ -197,6 +197,13 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 		s.writeStatus(w, err)
 
 	case op == "resume" && r.Method == http.MethodPost:
+		// A lost sandbox has no reservation left; say why instead of a conflict.
+		if lost, ok := s.svc.(lostReasoner); ok {
+			if reason, isLost := lost.LostReason(id); isLost {
+				s.writeStatus(w, &plane.LostError{Reason: reason})
+				return
+			}
+		}
 		if s.admission != nil {
 			if err := s.admission.ReserveResume(id); err != nil {
 				if errors.Is(err, plane.ErrNoCapacity) {
@@ -330,10 +337,21 @@ func (s *Server) writeResult(w http.ResponseWriter, res any, err error) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// writeStatus maps a lifecycle error to an HTTP status (404 for missing session).
+// lostReasoner reports why a sandbox was lost (session.Manager).
+type lostReasoner interface {
+	LostReason(sessionID string) (string, bool)
+}
+
+// writeStatus maps a lifecycle error to an HTTP status (404 for missing
+// session, 410 sandbox_lost for a sandbox whose VM is gone).
 func (s *Server) writeStatus(w http.ResponseWriter, err error) {
 	if err == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	var lost *plane.LostError
+	if errors.As(err, &lost) {
+		writeJSON(w, http.StatusGone, plane.ErrorResponse{Code: "sandbox_lost", Error: err.Error(), Reason: lost.Reason})
 		return
 	}
 	code := http.StatusInternalServerError

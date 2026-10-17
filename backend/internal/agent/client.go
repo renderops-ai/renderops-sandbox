@@ -163,6 +163,8 @@ func (c *Client) doWith(ctx context.Context, client *http.Client, method, path s
 				return fmt.Errorf("%w: %s", plane.ErrNoCapacity, e.Error)
 			case "sandbox_not_active":
 				return fmt.Errorf("%w: %s", plane.ErrSandboxNotActive, e.Error)
+			case "sandbox_lost":
+				return &plane.LostError{Reason: e.Reason}
 			}
 			return fmt.Errorf("agent %s: %s", e.Code, e.Error)
 		}

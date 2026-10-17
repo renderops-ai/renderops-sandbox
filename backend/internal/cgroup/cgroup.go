@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -108,6 +109,32 @@ func (c *Cgroup) AddPID(pid int) error {
 		return fmt.Errorf("cgroup: add pid %d: %w", pid, err)
 	}
 	return nil
+}
+
+// OOMKills returns how many processes the kernel OOM killer has killed in this
+// cgroup: the oom_kill counter of its memory.events.
+func (c *Cgroup) OOMKills() (uint64, error) {
+	return ReadOOMKills(filepath.Join(c.path, "memory.events"))
+}
+
+// ReadOOMKills reads the oom_kill counter from a cgroup v2 memory.events file.
+func ReadOOMKills(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: read %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || key != "oom_kill" {
+			continue
+		}
+		count, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cgroup: parse oom_kill in %s: %w", path, err)
+		}
+		return count, nil
+	}
+	return 0, fmt.Errorf("cgroup: no oom_kill counter in %s", path)
 }
 
 func (c *Cgroup) Destroy() error {

@@ -72,6 +72,32 @@ scheduling -> provisioning -> active -> paused -> resuming -> active
 Failed lifecycle operations may set `error`. Public operations only succeed
 when the current state permits the requested transition.
 
+A sandbox whose VM is gone moves to the terminal state `lost`: its VM process
+died (for example, killed when the sandbox ran out of memory), it was still
+running when its worker shut down and could not be paused, or its worker no
+longer has it after a restart. Nothing can resume a lost sandbox. Run, exec,
+pause, resume and `GET /session/{sandboxID}` answer `410 sandbox_lost`;
+`DELETE /session/{sandboxID}` still removes it.
+
+```json
+{
+  "status": "error",
+  "code": "sandbox_lost",
+  "message": "this sandbox's VM is gone and it cannot be resumed: VM crashed (out of memory)",
+  "reason": "VM crashed (out of memory)",
+  "hint": "remove the sandbox (DELETE /session/3ecb0221-faf1-4976-a8ae-6fd6262de59a) and create a new one",
+  "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+  "request_id": "4e245aae-1694-4dd5-b944-7180bf480fe8"
+}
+```
+
+Reasons include `VM crashed (out of memory)`, `VM crashed (Firecracker signal:
+killed)`, `VM stopped unexpectedly (guest shut down or rebooted)`, `worker shut
+down before the sandbox could be paused` and `not found on worker after
+restart`. The reason is also recorded as a `sandbox.lost` audit event
+(`metadata.reason`). `GET /session` lists lost sandboxes with `"state":
+"lost"`.
+
 ## Health
 
 ### `GET /health`
@@ -230,7 +256,8 @@ curl -sS "$RENDEROPS_API_URL/session" \
 ### `GET /session/{sandboxID}`
 
 Returns lifecycle, limits, and aggregate execution statistics for an owned
-sandbox. Missing and foreign IDs both return `404`.
+sandbox. Missing and foreign IDs both return `404`; a lost sandbox returns
+`410 sandbox_lost` (see [Sandbox states](#sandbox-states)).
 
 ```bash
 curl -sS "$RENDEROPS_API_URL/session/$SANDBOX_ID" \
@@ -374,6 +401,10 @@ When Blob checkpointing is configured, pause uploads immutable VM state and
 memory plus a chunked writable-disk generation before local artifacts may be
 removed. Unchanged writable chunks are reused across generations.
 
+If the VM is already dead (for example, killed for running out of memory), the
+pause marks the sandbox `lost` and answers `410 sandbox_lost` with the reason;
+it is not retried. Run, exec and resume of a lost sandbox answer the same.
+
 ### `POST /session/{sandboxID}/resume`
 
 Reserves capacity on the sandbox's assigned worker, restores the most recent
@@ -401,7 +432,8 @@ changes described in [PLAN.md](PLAN.md).
 
 Destroys the microVM and writable disk, releases the placement and worker
 reservation, bills any final active runtime, and leaves the durable row in the
-`destroyed` state for history/audit purposes.
+`destroyed` state for history/audit purposes. This is also how a `lost`
+sandbox is removed.
 
 ```bash
 curl -i -X DELETE "$RENDEROPS_API_URL/session/$SANDBOX_ID" \
@@ -1054,7 +1086,28 @@ Worker calls send `X-Orchestrator-Token: $WORKER_TOKEN`:
 | `PUT` | `/internal/workers/{workerID}` | Register/update endpoint and allocatable capacity |
 | `POST` | `/internal/workers/{workerID}/heartbeat` | Publish authoritative free/reserved capacity |
 | `POST` | `/internal/workers/{workerID}/draining` | Include/exclude worker from new placement |
-| `POST` | `/internal/workers/{workerID}/sandboxes/{sandboxID}/state` | Report lifecycle state |
+| `POST` | `/internal/workers/{workerID}/sandboxes/{sandboxID}/state` | Report lifecycle state (`{"state":"lost","reason":"..."}` for a VM that died) |
+| `POST` | `/internal/workers/{workerID}/inventory` | Reconcile placements with the sandboxes the worker holds |
+
+The worker sends its inventory right after registering and every minute:
+
+```json
+{
+  "sandboxes": ["<running or paused sandbox id>", "..."],
+  "lost": [{"id": "<sandbox id>", "reason": "VM crashed (out of memory)"}],
+  "durable_checkpoints": true,
+  "complete": true
+}
+```
+
+`lost` carries lost sandboxes whose report the orchestrator has not yet
+acknowledged. Rows placed on the worker in `active`, `paused`, `resuming` or
+`provisioning` that are not in `sandboxes` are marked `lost` ("not found on
+worker after restart") and their placement released, except rows changed in
+the last 2 minutes, `provisioning`/`resuming` rows younger than 15 minutes,
+and `paused` rows when the worker checkpoints to object storage
+(`durable_checkpoints`) or could not recover its paused sandboxes
+(`complete: false`). The response lists the ids marked lost.
 
 Control-plane calls send
 `X-Orchestrator-Token: $ORCHESTRATOR_TOKEN`:
@@ -1092,6 +1145,10 @@ stream; the output is still returned). The files API sets `active_only` and
 `quiet` for every command and `passive` for reads. Agent-session commands, the
 workspace checkout and the IDE's commands are quiet too. A guest agent built
 before `quiet` ignores it and logs the output as before.
+
+Run, exec, pause and resume of a sandbox whose VM died answer `410
+sandbox_lost` with a `reason` field; the orchestrator passes the same code and
+reason through.
 
 Terminal create/attach/close uses the internal worker gRPC service on the same
 private listener. Preview traffic uses the worker's sandbox-port proxy path.

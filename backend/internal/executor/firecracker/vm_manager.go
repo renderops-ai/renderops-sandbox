@@ -83,6 +83,13 @@ type MicroVM struct {
 	MemBasePath   string
 	memBaseShared bool // MemBasePath is a template's, shared by many VMs
 	trackDirty    bool // restored with Firecracker dirty-page tracking on
+
+	// Process exit tracking (see watch in exit.go). exited is closed once the
+	// process has been reaped; exitInfo is valid after that. stopping is set
+	// before an intentional kill, so that exit is not reported as a crash.
+	exited   chan struct{}
+	exitInfo ExitInfo
+	stopping atomic.Bool
 }
 
 type NetworkInterface struct {
@@ -190,6 +197,9 @@ type FireCrackerManager struct {
 	FCGid         int
 	writableDisks writabledisk.Store
 	memoryBases   memoryBaseCache // reflinkable copies of template memory, see memdiff.go
+
+	exitMu sync.RWMutex
+	onExit func(vmID string, info ExitInfo) // see SetExitHandler
 }
 
 type VMManager interface {
@@ -589,6 +599,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	vm.Stdout = &stdout
 	vm.Stderr = &stderr
 	vm.State = VMStateRunning
+	f.watch(vm)
 	f.mu.Unlock()
 
 	return nil
@@ -646,10 +657,7 @@ func (f *FireCrackerManager) teardown(ctx context.Context, vmID string, keepDisk
 	delete(f.Vms, vmID)
 	f.mu.Unlock()
 
-	if vm.Process != nil {
-		vm.Process.Process.Kill()
-		vm.Process.Wait()
-	}
+	stopProcess(vm)
 
 	os.Remove(vm.SocketPath)
 	os.Remove(vm.VsockPath)
@@ -948,6 +956,7 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 
 	f.mu.Lock()
 	f.Vms[vmID] = vm
+	f.watch(vm)
 	f.mu.Unlock()
 
 	slog.Info("snapshot restore timings",
@@ -1094,10 +1103,7 @@ func (f *FireCrackerManager) CreateTemplateWithProvision(ctx context.Context, cf
 	vm.State = VMStateDestroyed
 	delete(f.Vms, vm.ID)
 	f.mu.Unlock()
-	if vm.Process != nil {
-		vm.Process.Process.Kill()
-		vm.Process.Wait()
-	}
+	stopProcess(vm)
 	os.Remove(vm.SocketPath)
 	os.Remove(vsockPath)
 	if tapName != "" {

@@ -40,6 +40,7 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/workers/{workerID}/heartbeat", s.authed(s.workerToken, s.heartbeat))
 	mux.HandleFunc("POST /internal/workers/{workerID}/draining", s.authed(s.workerToken, s.setWorkerDraining))
 	mux.HandleFunc("POST /internal/workers/{workerID}/sandboxes/{sandboxID}/state", s.authed(s.workerToken, s.workerState))
+	mux.HandleFunc("POST /internal/workers/{workerID}/inventory", s.authed(s.workerToken, s.workerInventory))
 	mux.HandleFunc("POST /internal/placements", s.authed(s.controlToken, s.place))
 	mux.HandleFunc("GET /internal/placements/{sandboxID}", s.authed(s.controlToken, s.getPlacement))
 	mux.HandleFunc("DELETE /internal/placements/{sandboxID}", s.authed(s.controlToken, s.releasePlacement))
@@ -131,21 +132,43 @@ func (s *HTTPServer) setWorkerDraining(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) workerState(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		State string `json:"state"`
+		State  string `json:"state"`
+		Reason string `json:"reason,omitempty"` // why a "lost" sandbox was lost
 	}
 	if err := decodeHTTPJSON(w, r, &request); err != nil {
 		return
 	}
-	if err := s.service.ReportWorkerState(
-		r.Context(),
-		r.PathValue("workerID"),
-		r.PathValue("sandboxID"),
-		request.State,
-	); err != nil {
+	var err error
+	if strings.TrimSpace(request.State) == "lost" {
+		err = s.service.ReportWorkerLost(r.Context(), r.PathValue("workerID"), r.PathValue("sandboxID"), request.Reason)
+	} else {
+		err = s.service.ReportWorkerState(
+			r.Context(),
+			r.PathValue("workerID"),
+			r.PathValue("sandboxID"),
+			request.State,
+		)
+	}
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// workerInventory reconciles the sandboxes placed on a worker with the ones it
+// holds (see Service.ReconcileWorker).
+func (s *HTTPServer) workerInventory(w http.ResponseWriter, r *http.Request) {
+	var inventory WorkerInventory
+	if err := decodeHTTPJSON(w, r, &inventory); err != nil {
+		return
+	}
+	result, err := s.service.ReconcileWorker(r.Context(), r.PathValue("workerID"), inventory)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, result)
 }
 
 func (s *HTTPServer) place(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +257,13 @@ func decodeHTTPJSON(w http.ResponseWriter, r *http.Request, out any) error {
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {
+	var lost *plane.LostError
+	if errors.As(err, &lost) {
+		writeHTTPJSON(w, http.StatusGone, map[string]string{
+			"code": "sandbox_lost", "error": err.Error(), "reason": lost.Reason,
+		})
+		return
+	}
 	switch {
 	case errors.Is(err, ErrNoCapacity):
 		writeHTTPError(w, http.StatusServiceUnavailable, "no_capacity", err.Error())

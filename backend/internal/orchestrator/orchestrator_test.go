@@ -32,6 +32,10 @@ type fakeStore struct {
 	releaseWorker  string
 	reserveErrors  []error
 	reserveCalls   int
+	workerRows     []PlacedSandbox
+	listedWorker   string
+	listedStates   []string
+	lostMarks      []lostMark
 	err            error
 }
 
@@ -101,6 +105,23 @@ func (f *fakeStore) ReleasePlacement(_ context.Context, _ string, state string) 
 func (f *fakeStore) ReleaseWorkerPlacement(_ context.Context, _, workerID, state string) error {
 	f.releaseWorker, f.releaseState = workerID, state
 	return f.err
+}
+
+func (f *fakeStore) ListWorkerPlacements(_ context.Context, workerID string, states []string) ([]PlacedSandbox, error) {
+	f.listedWorker, f.listedStates = workerID, states
+	return f.workerRows, f.err
+}
+
+func (f *fakeStore) MarkPlacementLost(_ context.Context, sandboxID, workerID string, from []string, unchangedSince time.Time, reason string) (bool, error) {
+	f.lostMarks = append(f.lostMarks, lostMark{sandboxID, workerID, from, unchangedSince, reason})
+	return true, f.err
+}
+
+type lostMark struct {
+	sandboxID, workerID string
+	from                []string
+	unchangedSince      time.Time
+	reason              string
 }
 
 type fakeWorkerClient struct {

@@ -91,6 +91,13 @@ type Store interface {
 	CancelResume(context.Context, string, string) error
 	ReleasePlacement(context.Context, string, string) error
 	ReleaseWorkerPlacement(context.Context, string, string, string) error
+	// ListWorkerPlacements returns the rows placed on a worker in the given states.
+	ListWorkerPlacements(ctx context.Context, workerID string, states []string) ([]PlacedSandbox, error)
+	// MarkPlacementLost moves a row placed on workerID in one of fromStates
+	// (and, when unchangedSince is set, not updated after it) to "lost",
+	// releases its placement and records the reason. It reports whether it
+	// changed the row.
+	MarkPlacementLost(ctx context.Context, sandboxID, workerID string, fromStates []string, unchangedSince time.Time, reason string) (bool, error)
 }
 
 type Service struct {
@@ -433,6 +440,10 @@ func (s *Service) Pause(ctx context.Context, sandboxID string) (resultErr error)
 	}
 	workerID = placement.WorkerID
 	if err := s.workerClient(placement.Endpoint).Pause(ctx, sandboxID); err != nil {
+		var lost *plane.LostError
+		if errors.As(err, &lost) {
+			s.markLostAfterWorker(ctx, sandboxID, placement.WorkerID, lost)
+		}
 		return err
 	}
 	return s.store.PausePlacement(ctx, sandboxID, placement.WorkerID)
@@ -471,6 +482,12 @@ func (s *Service) Resume(ctx context.Context, sandboxID string) (resultErr error
 
 	client := s.workerClient(placement.Endpoint)
 	if err := client.Resume(ctx, sandboxID); err != nil {
+		// The worker lost the sandbox: no VM runs, nothing can resume it.
+		var lost *plane.LostError
+		if errors.As(err, &lost) {
+			s.markLostAfterWorker(ctx, sandboxID, placement.WorkerID, lost)
+			return err
+		}
 		// A timed-out restore may still have created a running VM. Pause it before
 		// returning the compute reservation to avoid an untracked active sandbox.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)

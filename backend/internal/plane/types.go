@@ -11,6 +11,25 @@ var ErrNoCapacity = errors.New("worker has insufficient capacity")
 // and the command asked not to resume it (ExecRequest.ActiveOnly).
 var ErrSandboxNotActive = errors.New("sandbox is not active")
 
+// ErrSandboxLost means the sandbox's VM is gone (it crashed, or its worker no
+// longer has it) and the sandbox cannot be resumed; it can only be removed.
+var ErrSandboxLost = errors.New("sandbox lost")
+
+// LostError is ErrSandboxLost with the reason the VM is gone, e.g. "VM crashed
+// (out of memory)".
+type LostError struct {
+	Reason string
+}
+
+func (e *LostError) Error() string {
+	if e.Reason == "" {
+		return ErrSandboxLost.Error()
+	}
+	return ErrSandboxLost.Error() + ": " + e.Reason
+}
+
+func (e *LostError) Is(target error) bool { return target == ErrSandboxLost }
+
 // SessionInfo is the plane-neutral view of a sandbox session — everything the
 // control plane may know about one. Host-side runtime state (VM handles,
 // snapshots, vsock) lives in internal/session on top of this.
@@ -153,4 +172,6 @@ type Capacity struct {
 type ErrorResponse struct {
 	Code  string `json:"code"`
 	Error string `json:"error"`
+	// Reason is why a sandbox was lost (code "sandbox_lost").
+	Reason string `json:"reason,omitempty"`
 }
