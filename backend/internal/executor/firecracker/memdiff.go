@@ -1,7 +1,6 @@
 package firecracker
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,8 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,9 +27,6 @@ import (
 // loaded from (a reflink, so instant, on the pause filesystem) with the changed pages
 // written over it. The full file is not fsynced; the durable copy is the Blob
 // checkpoint.
-
-// diffScratchDir holds Firecracker's diff files for the second it takes to merge them.
-const diffScratchDir = "/dev/shm/renderops-pause"
 
 // memoryCopyChunk is the unit sparseCopy skips when it is all zeros.
 const memoryCopyChunk = 4 << 20
@@ -88,12 +82,15 @@ func (f *FireCrackerManager) SnapshotMemory(ctx context.Context, vmID, snapPath,
 // memPath from the VM's base memory file and those pages.
 func (f *FireCrackerManager) diffSnapshot(client *http.Client, vm *MicroVM, snapPath, memPath string) error {
 	start := time.Now()
-	info, err := os.Stat(vm.MemBasePath)
-	if err != nil {
+	if _, err := os.Stat(vm.MemBasePath); err != nil {
 		return fmt.Errorf("stat memory base: %w", err)
 	}
-	scratch, inRAM := f.diffScratch(info.Size(), filepath.Dir(memPath))
-	diffPath := filepath.Join(scratch, vm.ID+"-"+uuid.NewString()+".diff")
+	// The diff goes next to memPath on disk, never to /dev/shm: Firecracker writes
+	// it from inside the VM's memory cgroup, and tmpfs pages are charged there and
+	// can't be reclaimed. A guest using most of its RAM plus a large diff then hit
+	// the cgroup limit and the kernel OOM-killed the VM mid-pause. Page cache on
+	// disk is reclaimable, so the snapshot can't push the VM over its limit.
+	diffPath := filepath.Join(filepath.Dir(memPath), vm.ID+"-"+uuid.NewString()+".diff")
 	defer os.Remove(diffPath)
 	if err := f.putJSON(client, "http://localhost/snapshot/create", SnapshotCreateRequest{
 		SnapshotType: "Diff",
@@ -111,50 +108,9 @@ func (f *FireCrackerManager) diffSnapshot(client *http.Client, vm *MicroVM, snap
 	}
 	vm.MemBasePath, vm.memBaseShared = memPath, false
 	slog.Info("pause snapshot written", "vm_id", vm.ID, "type", "diff",
-		"changed_mb", build.changedBytes>>20, "base", build.clone, "scratch_in_ram", inRAM,
+		"changed_mb", build.changedBytes>>20, "base", build.clone,
 		"diff_ms", diffTime.Milliseconds(), "build_ms", time.Since(buildStart).Milliseconds())
 	return nil
-}
-
-// diffScratch picks where Firecracker writes a diff: RAM when there is room for a diff
-// as large as the whole guest memory, otherwise fallback (on disk, where Firecracker's
-// fsync makes it slower).
-func (f *FireCrackerManager) diffScratch(guestBytes int64, fallback string) (string, bool) {
-	if err := os.MkdirAll(diffScratchDir, 0o755); err == nil {
-		if f.FCUid > 0 {
-			if err := os.Chown(diffScratchDir, f.FCUid, f.FCGid); err != nil {
-				slog.Warn("chown diff scratch dir", "dir", diffScratchDir, "err", err)
-				return fallback, false
-			}
-		}
-		var fs unix.Statfs_t
-		if unix.Statfs(diffScratchDir, &fs) == nil && int64(fs.Bavail)*int64(fs.Bsize) > guestBytes &&
-			memAvailable() > guestBytes+1<<30 {
-			return diffScratchDir, true
-		}
-	}
-	return fallback, false
-}
-
-// memAvailable returns MemAvailable from /proc/meminfo in bytes, or 0 if unknown.
-func memAvailable() int64 {
-	file, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[0] == "MemAvailable:" {
-			kb, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil {
-				return 0
-			}
-			return kb << 10
-		}
-	}
-	return 0
 }
 
 type memoryBuild struct {
